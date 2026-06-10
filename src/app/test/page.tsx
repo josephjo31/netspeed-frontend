@@ -11,7 +11,7 @@ import {
   fetchNetworkInfo,
   getBrowserInfo,
   getTestMode,
-  TEST_SERVER_URL,
+  TEST_SERVER_LABEL,
   measurePing,
   measureDownload,
   measureUpload,
@@ -164,7 +164,7 @@ export default function TestPage() {
         upload: uploadResult,
         packetLoss: "unavailable",
         browser,
-        server: TEST_SERVER_URL || "Cloudflare / Auto-selected",
+        server: TEST_SERVER_LABEL,
         mode: getTestMode(),
         score,
         timestamp: new Date().toLocaleString(),
@@ -493,7 +493,7 @@ function Results({
   results: TestResults;
   onReset: () => void;
 }) {
-  const { ping, download, upload, network, browser, score, timestamp, mode } = results;
+  const { ping, download, upload, network, browser, score, timestamp } = results;
   const { label: scoreText, color: scoreColor } = scoreLabel(score);
 
   return (
@@ -535,47 +535,16 @@ function Results({
           <span
             className="inline-flex items-center px-3 py-1 rounded-full font-display text-[10px] tracking-[0.15em] uppercase border"
             style={{
-              color: mode === "dedicated" ? "#A3FF47" : "#F59E0B",
-              borderColor: mode === "dedicated" ? "#A3FF4733" : "#F59E0B33",
-              background: mode === "dedicated" ? "#A3FF4710" : "#F59E0B10",
+              color: "#A3FF47",
+              borderColor: "#A3FF4733",
+              background: "#A3FF4710",
             }}
           >
-            {mode === "dedicated" ? "Dedicated Server" : "Browser Estimate"}
+            Real Server Test
           </span>
         </div>
         <p className="text-xs text-[#4A5568]">Tested {timestamp}</p>
       </div>
-
-      {/* Browser-mode accuracy warning */}
-      {mode === "browser" && (
-        <div className="rounded-xl border border-[#F59E0B]/25 bg-[#F59E0B]/5 px-5 py-4 flex items-start gap-3">
-          <svg
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="#F59E0B"
-            strokeWidth={1.5}
-            className="w-5 h-5 shrink-0 mt-0.5"
-          >
-            <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
-            <line x1="12" y1="9" x2="12" y2="13" />
-            <line x1="12" y1="17" x2="12.01" y2="17" />
-          </svg>
-          <div>
-            <p className="text-sm font-medium text-[#F59E0B] mb-1">
-              Estimated results only
-            </p>
-            <p className="text-xs text-[#94A3B8] leading-relaxed">
-              This test ran in browser-only mode against public endpoints, so
-              results — upload especially — are rough estimates and not directly
-              comparable to dedicated tools like Ookla Speedtest. Configure{" "}
-              <code className="bg-[#1C2030] px-1 rounded">
-                NEXT_PUBLIC_TEST_SERVER_URL
-              </code>{" "}
-              to run against a dedicated test server.
-            </p>
-          </div>
-        </div>
-      )}
 
       {/* Main metrics */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
