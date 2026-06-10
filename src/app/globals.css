@@ -1,0 +1,61 @@
+@import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Inter:wght@300;400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    box-sizing: border-box;
+    padding: 0;
+    margin: 0;
+  }
+
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    background-color: #090B10;
+    color: #E2E8F0;
+    font-family: 'Inter', sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  ::-webkit-scrollbar {
+    width: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    background: #090B10;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #1C2030;
+    border-radius: 3px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: #00E5FF;
+  }
+}
+
+@layer utilities {
+  .glow-accent {
+    box-shadow: 0 0 20px rgba(0, 229, 255, 0.3), 0 0 40px rgba(0, 229, 255, 0.1);
+  }
+  .glow-lime {
+    box-shadow: 0 0 20px rgba(163, 255, 71, 0.3), 0 0 40px rgba(163, 255, 71, 0.1);
+  }
+  .text-glow-accent {
+    text-shadow: 0 0 20px rgba(0, 229, 255, 0.6);
+  }
+  .text-glow-lime {
+    text-shadow: 0 0 20px rgba(163, 255, 71, 0.6);
+  }
+  .border-glow-accent {
+    border-color: #00E5FF;
+    box-shadow: 0 0 0 1px rgba(0, 229, 255, 0.3), inset 0 0 20px rgba(0, 229, 255, 0.05);
+  }
+  .border-glow-lime {
+    border-color: #A3FF47;
+    box-shadow: 0 0 0 1px rgba(163, 255, 71, 0.3), inset 0 0 20px rgba(163, 255, 71, 0.05);
+  }
+}
