@@ -1,6 +1,6 @@
 // ─────────────────────────────────────────────
 // NetSpeed.me – Speed Test Engine
-// Pure browser-based, no paid APIs required
+// Runs against the dedicated Hostinger backend
 // ─────────────────────────────────────────────
 
 export interface NetworkInfo {
@@ -51,23 +51,21 @@ export interface TestResults {
 
 // ─── Test server configuration ────────────────────────────────────────────────
 
-// Optional dedicated speedtest backend (see server/speedtest-server.js for a
-// reference implementation). It must expose CORS-enabled endpoints:
-//   GET  /download?bytes=N  → streams N incompressible bytes
-//   POST /upload            → accepts and discards a binary body
-//   GET  /ping              → responds immediately
-// With a dedicated server, results are comparable to tools like Ookla.
-// Without one, public endpoints are used and results are an estimate only —
-// upload in particular reads low, since public echo endpoints are not built
-// for sustained upload throughput.
+// Dedicated speedtest backend (Hostinger). Exposes CORS-enabled endpoints:
+//   GET  /ping                 → JSON latency probe
+//   GET  /download?size=100MB  → streams incompressible bytes
+//   POST /upload               → accepts and discards a binary body
+// NEXT_PUBLIC_TEST_SERVER_URL can override the default for staging/local dev.
 export const TEST_SERVER_URL = (
-  process.env.NEXT_PUBLIC_TEST_SERVER_URL ?? ""
+  process.env.NEXT_PUBLIC_TEST_SERVER_URL || "https://speed.netspeed.me"
 ).replace(/\/+$/, "");
 
-export type TestMode = "dedicated" | "browser";
+export const TEST_SERVER_LABEL = `Hostinger / ${new URL(TEST_SERVER_URL).hostname}`;
+
+export type TestMode = "dedicated";
 
 export function getTestMode(): TestMode {
-  return TEST_SERVER_URL ? "dedicated" : "browser";
+  return "dedicated";
 }
 
 // ─── Network / IP Info ───────────────────────────────────────────────────────
@@ -216,45 +214,27 @@ export function getBrowserInfo(): BrowserInfo {
 
 // ─── Ping & Jitter ────────────────────────────────────────────────────────────
 
-// We hit a fast, CORS-friendly endpoint repeatedly and measure round-trip time.
-// Cloudflare's /cdn-cgi/trace is ideal — tiny payload, global CDN, always up.
-const BROWSER_PING_TARGETS = [
-  "https://cloudflare.com/cdn-cgi/trace",
-  "https://www.google.com/generate_204",
-  "https://httpbin.org/get",
-];
-
-function pingTargets(): string[] {
-  return TEST_SERVER_URL
-    ? [`${TEST_SERVER_URL}/ping`, ...BROWSER_PING_TARGETS]
-    : BROWSER_PING_TARGETS;
-}
-
+// Round-trip time against the backend's /ping endpoint — the same server the
+// throughput tests run on, so latency and speed describe the same path.
 export async function measurePing(
   samples = 10,
   onSample?: (ms: number, i: number) => void
 ): Promise<PingResult> {
   const results: number[] = [];
+  const target = `${TEST_SERVER_URL}/ping`;
 
-  // Find a working target first
-  const targets = pingTargets();
-  let target = targets[0];
-  for (const t of targets) {
-    try {
-      await fetch(t, { method: "HEAD", mode: "no-cors", signal: AbortSignal.timeout(3000) });
-      target = t;
-      break;
-    } catch {
-      // continue
-    }
+  // Warm-up request: opens the TCP+TLS connection so the timed samples
+  // measure round-trip latency, not connection setup.
+  try {
+    await fetch(target, { cache: "no-store", signal: AbortSignal.timeout(3000) });
+  } catch {
+    // sampled requests below will surface a dead server
   }
 
   for (let i = 0; i < samples; i++) {
     try {
       const t0 = performance.now();
       await fetch(`${target}?_=${Date.now()}-${i}`, {
-        method: "HEAD",
-        mode: "no-cors",
         cache: "no-store",
         signal: AbortSignal.timeout(5000),
       });
@@ -325,20 +305,9 @@ function makeReporter(
   };
 }
 
-// CORS-friendly bulk sources, refetched as many times as the window allows.
-// If one fails before delivering any data we move to the next. A configured
-// dedicated server always takes priority.
-const BROWSER_DOWNLOAD_SOURCES = [
-  "https://speed.cloudflare.com/__down?bytes=50000000",
-  "https://speed.cloudflare.com/__down?bytes=10000000",
-  "https://ipv4.download.thinkbroadband.com/10MB.zip",
-];
-
-function downloadSources(): string[] {
-  return TEST_SERVER_URL
-    ? [`${TEST_SERVER_URL}/download?bytes=50000000`, ...BROWSER_DOWNLOAD_SOURCES]
-    : BROWSER_DOWNLOAD_SOURCES;
-}
+// The backend streams incompressible bytes; each stream refetches the 100MB
+// payload as many times as the 10-second window allows.
+const DOWNLOAD_URL = `${TEST_SERVER_URL}/download?size=100MB`;
 
 // Parallel connections saturate the link better than a single stream,
 // matching how dedicated tools (Ookla, fast.com) measure.
@@ -347,7 +316,7 @@ const DOWNLOAD_PARALLEL_STREAMS = 4;
 export async function measureDownload(
   onProgress?: (pct: number, mbps: number) => void
 ): Promise<SpeedResult> {
-  const sources = downloadSources();
+  const sources = [DOWNLOAD_URL];
   const start = performance.now();
   const deadline = start + DOWNLOAD_TEST_DURATION_MS;
   const report = makeReporter(start, DOWNLOAD_TEST_DURATION_MS, onProgress);
@@ -404,8 +373,10 @@ export async function measureDownload(
     if (ticker) clearInterval(ticker);
   }
 
-  // Nothing transferred at all: synthetic read of a local ArrayBuffer
-  if (total === 0) return syntheticDownloadFallback(onProgress);
+  // Nothing transferred at all — the test server is unreachable.
+  if (total === 0) {
+    throw new Error("Could not reach the test server for the download test.");
+  }
 
   const durationMs = performance.now() - start;
   const mbps = (total * 8) / ((durationMs / 1000) * 1_000_000);
@@ -413,50 +384,11 @@ export async function measureDownload(
   return { mbps: Math.round(mbps * 10) / 10, bytes: total, durationMs };
 }
 
-async function syntheticDownloadFallback(
-  onProgress?: (pct: number, mbps: number) => void
-): Promise<SpeedResult> {
-  // Simulate writing and reading 5MB through a Blob URL to exercise I/O
-  try {
-    const SIZE = 5 * 1024 * 1024;
-    const data = new Uint8Array(SIZE);
-    fillRandom(data.subarray(0, 65536)); // random first 64KB only (fast)
-
-    const t0 = performance.now();
-    const blob = new Blob([data]);
-    const url = URL.createObjectURL(blob);
-
-    const res = await fetch(url);
-    const buf = await res.arrayBuffer();
-    URL.revokeObjectURL(url);
-
-    const durationMs = performance.now() - t0;
-    const mbps = (buf.byteLength * 8) / ((durationMs / 1000) * 1_000_000);
-    onProgress?.(100, Math.round(mbps * 10) / 10);
-    return { mbps: Math.round(mbps * 10) / 10, bytes: buf.byteLength, durationMs };
-  } catch {
-    onProgress?.(100, 0);
-    return { mbps: 0, bytes: 0, durationMs: 0 };
-  }
-}
-
 // ─── Upload Speed ─────────────────────────────────────────────────────────────
 
-// We POST random binary data to a CORS-enabled echo/discard endpoint.
-// speed.cloudflare.com/__up discards the body (no echo overhead) and sends
-// Access-Control-Allow-Origin: *, so it goes first among the public ones.
-// A configured dedicated server always takes priority.
-const BROWSER_UPLOAD_ENDPOINTS = [
-  "https://speed.cloudflare.com/__up",
-  "https://httpbin.org/post",
-  "https://postman-echo.com/post",
-];
-
-function uploadEndpoints(): string[] {
-  return TEST_SERVER_URL
-    ? [`${TEST_SERVER_URL}/upload`, ...BROWSER_UPLOAD_ENDPOINTS]
-    : BROWSER_UPLOAD_ENDPOINTS;
-}
+// We POST random binary data to the backend's /upload endpoint, which
+// accepts and discards the body (no echo overhead).
+const UPLOAD_URL = `${TEST_SERVER_URL}/upload`;
 
 const UPLOAD_CHUNK_BYTES = 2 * 1024 * 1024; // per-POST payload, re-sent until time is up
 
@@ -508,69 +440,42 @@ export async function measureUpload(
   fillRandom(data.subarray(0, 131072)); // random first 128KB
   const blob = new Blob([data], { type: "application/octet-stream" });
 
-  const endpoints = uploadEndpoints();
   const start = performance.now();
   const deadline = start + UPLOAD_TEST_DURATION_MS;
   const report = makeReporter(start, UPLOAD_TEST_DURATION_MS, onProgress);
   let total = 0;
-  let endpointIdx = 0;
+  let failures = 0;
 
   // Keep the progress bar moving between upload-progress events
   const ticker = onProgress ? setInterval(() => report(total), 200) : null;
 
   try {
-    while (performance.now() < deadline && endpointIdx < endpoints.length) {
+    while (performance.now() < deadline && failures < 3) {
       let chunkSent = 0;
       try {
-        await uploadChunk(endpoints[endpointIdx], blob, deadline, (delta) => {
+        await uploadChunk(UPLOAD_URL, blob, deadline, (delta) => {
           chunkSent += delta;
           total += delta;
           report(total);
         });
       } catch {
         total -= chunkSent; // a failed POST never reached the server
-        endpointIdx++;
+        failures++;
       }
     }
   } finally {
     if (ticker) clearInterval(ticker);
   }
 
-  // Fallback: measure local Blob encoding throughput
-  if (total === 0) return syntheticUploadFallback(onProgress);
+  // Nothing transferred at all — the test server is unreachable.
+  if (total === 0) {
+    throw new Error("Could not reach the test server for the upload test.");
+  }
 
   const durationMs = performance.now() - start;
   const mbps = (total * 8) / ((durationMs / 1000) * 1_000_000);
   report(total, true);
   return { mbps: Math.round(mbps * 10) / 10, bytes: total, durationMs };
-}
-
-async function syntheticUploadFallback(
-  onProgress?: (pct: number, mbps: number) => void
-): Promise<SpeedResult> {
-  try {
-    const SIZE = 2 * 1024 * 1024;
-    const data = new Uint8Array(SIZE);
-    fillRandom(data.subarray(0, 65536));
-
-    const t0 = performance.now();
-    // Encode to base64 (simulates upload serialisation work)
-    const blob = new Blob([data]);
-    const reader = new FileReader();
-    await new Promise<void>((resolve) => {
-      reader.onload = () => resolve();
-      reader.onerror = () => resolve();
-      reader.readAsDataURL(blob);
-    });
-
-    const durationMs = performance.now() - t0;
-    const mbps = (SIZE * 8) / ((durationMs / 1000) * 1_000_000);
-    onProgress?.(100, Math.round(mbps * 10) / 10);
-    return { mbps: Math.round(mbps * 10) / 10, bytes: SIZE, durationMs };
-  } catch {
-    onProgress?.(100, 0);
-    return { mbps: 0, bytes: 0, durationMs: 0 };
-  }
 }
 
 // ─── Score ────────────────────────────────────────────────────────────────────
