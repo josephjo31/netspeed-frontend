@@ -10,14 +10,15 @@ import ResultCard from "@/components/ResultCard";
 import {
   fetchNetworkInfo,
   getBrowserInfo,
-  getTestMode,
-  TEST_SERVER_LABEL,
+  selectBestServer,
+  serverHostname,
   measurePing,
   measureDownload,
   measureUpload,
   calculateScore,
   scoreLabel,
   formatMbps,
+  type ServerSelection,
   type TestResults,
   type NetworkInfo,
   type PingResult,
@@ -29,6 +30,7 @@ import {
 type Phase =
   | "idle"
   | "detecting"
+  | "selecting"
   | "ping"
   | "download"
   | "upload"
@@ -51,6 +53,7 @@ export default function TestPage() {
   const [phase, setPhase] = useState<Phase>("idle");
   const [error, setError] = useState<string | null>(null);
   const [results, setResults] = useState<TestResults | null>(null);
+  const [selection, setSelection] = useState<ServerSelection | null>(null);
   const [live, setLive] = useState<LiveState>({
     pingMs: 0,
     pingSamples: [],
@@ -76,6 +79,7 @@ export default function TestPage() {
     abortRef.current = false;
     setError(null);
     setResults(null);
+    setSelection(null);
     resetLive();
 
     try {
@@ -94,12 +98,22 @@ export default function TestPage() {
 
       if (abortRef.current) return;
 
-      // ── 2. Ping & Jitter ─────────────────────────────────────────────────
+      // ── 2. Pick the lowest-latency test server ───────────────────────────
+      // Unlike the other phases this one is fatal: without a reachable
+      // server there is nothing to measure against.
+      setPhase("selecting");
+      const selected = await selectBestServer();
+      setSelection(selected);
+      const serverUrl = selected.server.url;
+
+      if (abortRef.current) return;
+
+      // ── 3. Ping & Jitter ─────────────────────────────────────────────────
       setPhase("ping");
       let pingResult: PingResult | null = null;
 
       try {
-        pingResult = await measurePing(10, (ms, i) => {
+        pingResult = await measurePing(serverUrl, 10, (ms, i) => {
           if (abortRef.current) return;
           setLive((prev) => ({
             ...prev,
@@ -113,12 +127,12 @@ export default function TestPage() {
 
       if (abortRef.current) return;
 
-      // ── 3. Download ──────────────────────────────────────────────────────
+      // ── 4. Download ──────────────────────────────────────────────────────
       setPhase("download");
       let downloadResult: SpeedResult | null = null;
 
       try {
-        downloadResult = await measureDownload((pct, mbps) => {
+        downloadResult = await measureDownload(serverUrl, (pct, mbps) => {
           if (abortRef.current) return;
           setLive((prev) => ({
             ...prev,
@@ -132,12 +146,12 @@ export default function TestPage() {
 
       if (abortRef.current) return;
 
-      // ── 4. Upload ────────────────────────────────────────────────────────
+      // ── 5. Upload ────────────────────────────────────────────────────────
       setPhase("upload");
       let uploadResult: SpeedResult | null = null;
 
       try {
-        uploadResult = await measureUpload((pct, mbps) => {
+        uploadResult = await measureUpload(serverUrl, (pct, mbps) => {
           if (abortRef.current) return;
           setLive((prev) => ({
             ...prev,
@@ -151,7 +165,7 @@ export default function TestPage() {
 
       if (abortRef.current) return;
 
-      // ── 5. Score & finalise ──────────────────────────────────────────────
+      // ── 6. Score & finalise ──────────────────────────────────────────────
       setPhase("scoring");
       await new Promise((r) => setTimeout(r, 800)); // brief dramatic pause
 
@@ -164,8 +178,8 @@ export default function TestPage() {
         upload: uploadResult,
         packetLoss: "unavailable",
         browser,
-        server: TEST_SERVER_LABEL,
-        mode: getTestMode(),
+        server: selected.server,
+        serverLatencyMs: selected.latencyMs,
         score,
         timestamp: new Date().toLocaleString(),
       };
@@ -188,6 +202,7 @@ export default function TestPage() {
     setPhase("idle");
     setResults(null);
     setError(null);
+    setSelection(null);
     resetLive();
   };
 
@@ -219,11 +234,12 @@ export default function TestPage() {
 
           {/* ── Active test ──────────────────────────────────────────────── */}
           {(phase === "detecting" ||
+            phase === "selecting" ||
             phase === "ping" ||
             phase === "download" ||
             phase === "upload" ||
             phase === "scoring") && (
-            <ActiveTest phase={phase} live={live} />
+            <ActiveTest phase={phase} live={live} selection={selection} />
           )}
 
           {/* ── Results ──────────────────────────────────────────────────── */}
@@ -313,6 +329,7 @@ function IdleScreen({ onStart }: { onStart: () => void }) {
 
 const PHASE_LABELS: Record<string, string> = {
   detecting: "Detecting your network…",
+  selecting: "Selecting best test server…",
   ping: "Measuring ping & jitter…",
   download: "Testing download speed…",
   upload: "Testing upload speed…",
@@ -322,11 +339,13 @@ const PHASE_LABELS: Record<string, string> = {
 function ActiveTest({
   phase,
   live,
+  selection,
 }: {
   phase: Phase;
   live: LiveState;
+  selection: ServerSelection | null;
 }) {
-  const steps = ["detecting", "ping", "download", "upload", "scoring"];
+  const steps = ["detecting", "selecting", "ping", "download", "upload", "scoring"];
   const stepIdx = steps.indexOf(phase);
 
   return (
@@ -359,6 +378,16 @@ function ActiveTest({
             />
           ))}
         </div>
+
+        {/* Selected server, once the probe phase has picked one */}
+        {selection && (
+          <p className="mt-3 text-xs text-[#4A5568]">
+            Server:{" "}
+            <span className="text-[#94A3B8]">
+              {selection.server.name} · {serverHostname(selection.server)}
+            </span>
+          </p>
+        )}
       </div>
 
       {/* Gauges row */}
@@ -637,6 +666,30 @@ function Results({
         }
       />
 
+      {/* Selected test server */}
+      <div className="rounded-xl border border-[#1C2030] bg-[#0F1219] overflow-hidden">
+        <div className="px-5 py-4 border-b border-[#1C2030]">
+          <p className="text-xs text-[#4A5568] uppercase tracking-widest">
+            Selected Test Server
+          </p>
+        </div>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-0 divide-x divide-y divide-[#1C2030]">
+          {[
+            { label: "Server", value: results.server.name },
+            { label: "Host", value: serverHostname(results.server) },
+            { label: "Region", value: results.server.region },
+            { label: "Probe Latency", value: `${results.serverLatencyMs} ms` },
+          ].map(({ label, value }) => (
+            <div key={label} className="px-5 py-4">
+              <p className="text-[10px] text-[#4A5568] uppercase tracking-widest mb-1">
+                {label}
+              </p>
+              <p className="text-sm text-white font-medium truncate">{value}</p>
+            </div>
+          ))}
+        </div>
+      </div>
+
       {/* Network info grid */}
       {network && (
         <div className="rounded-xl border border-[#1C2030] bg-[#0F1219] overflow-hidden">
@@ -652,7 +705,10 @@ function Results({
               { label: "Country", value: network.country },
               { label: "City", value: `${network.city}${network.region ? `, ${network.region}` : ""}` },
               { label: "Timezone", value: network.timezone || "—" },
-              { label: "Server", value: results.server },
+              {
+                label: "Server",
+                value: `${results.server.name} · ${serverHostname(results.server)}`,
+              },
             ].map(({ label, value }) => (
               <div key={label} className="px-5 py-4">
                 <p className="text-[10px] text-[#4A5568] uppercase tracking-widest mb-1">

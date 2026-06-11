@@ -1,7 +1,12 @@
 // ─────────────────────────────────────────────
 // NetSpeed.me – Speed Test Engine
-// Runs against the dedicated Hostinger backend
+// Probes the server registry, picks the lowest-latency server, and runs
+// all measurements against it.
 // ─────────────────────────────────────────────
+
+import { TEST_SERVERS, type TestServer } from "./servers";
+
+export { TEST_SERVERS, serverHostname, type TestServer } from "./servers";
 
 export interface NetworkInfo {
   ip: string;
@@ -43,29 +48,290 @@ export interface TestResults {
   upload: SpeedResult | null;
   packetLoss: string;
   browser: BrowserInfo;
-  server: string;
-  mode: TestMode;
+  server: TestServer;
+  serverLatencyMs: number;
   score: number;
   timestamp: string;
 }
 
-// ─── Test server configuration ────────────────────────────────────────────────
+// ─── Server selection ─────────────────────────────────────────────────────────
 
-// Dedicated speedtest backend (Hostinger). Exposes CORS-enabled endpoints:
-//   GET  /ping                 → JSON latency probe
-//   GET  /download?size=100MB  → streams incompressible bytes
-//   POST /upload               → accepts and discards a binary body
-// NEXT_PUBLIC_TEST_SERVER_URL can override the default for staging/local dev.
-export const TEST_SERVER_URL = (
-  process.env.NEXT_PUBLIC_TEST_SERVER_URL || "https://speed.netspeed.me"
-).replace(/\/+$/, "");
+export interface ServerSelection {
+  server: TestServer;
+  latencyMs: number; // best probe RTT, used only for picking a server
+}
 
-export const TEST_SERVER_LABEL = `Hostinger / ${new URL(TEST_SERVER_URL).hostname}`;
+const PROBE_SAMPLES = 3;
+const PROBE_TIMEOUT_MS = 3000;
 
-export type TestMode = "dedicated";
+// ─── Latency sampling ──────────────────────────────────────────────────────
 
-export function getTestMode(): TestMode {
-  return "dedicated";
+// One latency sample against a server's /ping endpoint.
+//
+// Wall-clock fetch timing over-reports latency badly: hosting proxies add
+// per-request processing that ICMP ping never sees (~200ms per request on
+// Hostinger — 4x the real network RTT). When the server sends
+// Timing-Allow-Origin, the Resource Timing API allows better measurements,
+// in order of preference:
+//   1. TCP handshake time — one pure network round trip, immune to proxy
+//      and app processing. Available because /ping closes its connection,
+//      so every sample opens a fresh one.
+//   2. Request→first-byte time minus the app's Server-Timing duration —
+//      excludes connection setup and app work, still includes the proxy.
+//   3. Wall-clock fetch duration — the upper bound, used when the server
+//      doesn't expose timing data.
+// Resource Timing entries are recorded only after the response body
+// finishes loading, which can be a tick after fetch() resolves — poll
+// briefly instead of reading once.
+async function resourceEntryFor(
+  url: string
+): Promise<PerformanceResourceTiming | undefined> {
+  for (let i = 0; i < 6; i++) {
+    const entry = performance
+      .getEntriesByName(url)
+      .pop() as PerformanceResourceTiming | undefined;
+    if (entry) return entry;
+    await sleep(16);
+  }
+  return undefined;
+}
+
+async function sampleLatency(
+  serverUrl: string,
+  tag: string,
+  timeoutMs: number
+): Promise<number> {
+  const url = `${serverUrl}/ping?_=${tag}`;
+  const t0 = performance.now();
+  const res = await fetch(url, {
+    cache: "no-store",
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  const wall = performance.now() - t0;
+  try {
+    await res.arrayBuffer(); // completes the load so a timing entry exists
+  } catch {
+    // entry may appear regardless
+  }
+
+  const entry = await resourceEntryFor(url);
+  // requestStart stays 0 for cross-origin resources unless the server
+  // sent Timing-Allow-Origin.
+  if (!entry || entry.requestStart === 0) return wall;
+
+  if (entry.connectEnd > entry.connectStart) {
+    // Fresh connection. Over TCP+TLS the TCP handshake (connectStart →
+    // secureConnectionStart) is exactly one network round trip. Over QUIC
+    // (h3) transport and crypto are integrated and secureConnectionStart
+    // ≈ connectStart, so the full handshake is the closest bound.
+    const tcpRtt =
+      entry.secureConnectionStart > 0
+        ? entry.secureConnectionStart - entry.connectStart
+        : 0;
+    if (tcpRtt >= 1) return tcpRtt;
+    const quicRtt = entry.connectEnd - entry.connectStart;
+    if (quicRtt >= 1) return quicRtt;
+  }
+
+  // Reused connection: request sent → first response byte, minus the time
+  // the app itself reports having spent on the request. Still includes
+  // any per-request proxy processing.
+  const appMs =
+    entry.serverTiming?.find((t) => t.name === "app")?.duration ?? 0;
+  const reqRtt = entry.responseStart - entry.requestStart - appMs;
+  return reqRtt >= 1 ? reqRtt : wall;
+}
+
+// Frees Resource Timing buffer space (default cap ~250 entries) so latency
+// samples reliably get an entry even after download phases.
+function clearResourceTimings(): void {
+  try {
+    performance.clearResourceTimings();
+  } catch {
+    // optional optimisation only
+  }
+}
+
+// ─── WebSocket latency sampling (preferred) ──────────────────────────────────
+
+// HTTP requests through hosting proxies carry per-request processing that
+// no Resource Timing trick can subtract once connections are multiplexed
+// (h3) or keep-alive is proxy-managed. A WebSocket pays that cost once,
+// at upgrade — echoed frames afterwards measure the actual network round
+// trip, which is why dedicated tools report ICMP-class numbers.
+interface PingSession {
+  sample(timeoutMs?: number): Promise<number>;
+  close(): void;
+}
+
+function openPingSession(
+  serverUrl: string,
+  timeoutMs = 4000
+): Promise<PingSession> {
+  return new Promise((resolve, reject) => {
+    let ws: WebSocket;
+    try {
+      ws = new WebSocket(`${serverUrl.replace(/^http/, "ws")}/ws`);
+    } catch (e) {
+      return reject(e);
+    }
+    const timer = setTimeout(() => {
+      ws.close();
+      reject(new Error("WebSocket open timed out"));
+    }, timeoutMs);
+    ws.onopen = () => {
+      clearTimeout(timer);
+      resolve({
+        sample(sampleTimeoutMs = 5000) {
+          return new Promise<number>((res, rej) => {
+            const payload = `${Date.now()}-${Math.random()}`;
+            const sampleTimer = setTimeout(() => {
+              cleanup();
+              rej(new Error("Echo timed out"));
+            }, sampleTimeoutMs);
+            const onMessage = (ev: MessageEvent) => {
+              if (ev.data !== payload) return; // stale echo from a skipped sample
+              cleanup();
+              res(performance.now() - t0);
+            };
+            const onClose = () => {
+              cleanup();
+              rej(new Error("WebSocket closed"));
+            };
+            const cleanup = () => {
+              clearTimeout(sampleTimer);
+              ws.removeEventListener("message", onMessage);
+              ws.removeEventListener("close", onClose);
+            };
+            ws.addEventListener("message", onMessage);
+            ws.addEventListener("close", onClose);
+            const t0 = performance.now();
+            ws.send(payload);
+          });
+        },
+        close() {
+          try {
+            ws.close();
+          } catch {
+            // already closed
+          }
+        },
+      });
+    };
+    ws.onerror = () => {
+      clearTimeout(timer);
+      ws.close();
+      reject(new Error("WebSocket connection failed"));
+    };
+  });
+}
+
+// 10 echo round trips over one WebSocket; empty array if WS is unavailable
+// (older backend deployment, proxy without upgrade support).
+async function wsPingSamples(
+  serverUrl: string,
+  samples: number,
+  onSample?: (ms: number, i: number) => void
+): Promise<number[]> {
+  const results: number[] = [];
+  let session: PingSession;
+  try {
+    session = await openPingSession(serverUrl);
+  } catch {
+    return results;
+  }
+  try {
+    // Warm-up echo, never counted: absorbs upgrade-adjacent jitter.
+    try {
+      await session.sample(3000);
+    } catch {
+      // timed samples below will surface a dead socket
+    }
+    for (let i = 0; i < samples; i++) {
+      try {
+        const ms = Math.round(await session.sample(5000));
+        results.push(ms);
+        onSample?.(ms, i);
+        await sleep(100);
+      } catch {
+        // skip failed sample
+      }
+    }
+  } finally {
+    session.close();
+  }
+  return results;
+}
+
+// Best-of-N round trips to a server. Taking the minimum discounts
+// transient congestion. WebSocket echo first (same transport the ping
+// phase uses, so the displayed probe latency matches), HTTP /ping
+// otherwise. Returns null if no sample succeeds.
+async function probeServer(server: TestServer): Promise<number | null> {
+  try {
+    const session = await openPingSession(server.url, PROBE_TIMEOUT_MS);
+    try {
+      try {
+        await session.sample(PROBE_TIMEOUT_MS); // warm-up, never counted
+      } catch {
+        // counted samples below decide
+      }
+      let best: number | null = null;
+      for (let i = 0; i < PROBE_SAMPLES; i++) {
+        try {
+          const ms = await session.sample(PROBE_TIMEOUT_MS);
+          if (best === null || ms < best) best = ms;
+        } catch {
+          // a failed sample just doesn't count
+        }
+      }
+      if (best !== null) return Math.round(best);
+    } finally {
+      session.close();
+    }
+  } catch {
+    // no WebSocket on this server — probe over HTTP below
+  }
+
+  let best: number | null = null;
+  for (let i = 0; i < PROBE_SAMPLES; i++) {
+    try {
+      const ms = await sampleLatency(
+        server.url,
+        `probe-${Date.now()}-${i}`,
+        PROBE_TIMEOUT_MS
+      );
+      if (best === null || ms < best) best = ms;
+    } catch {
+      // a failed sample just doesn't count
+    }
+  }
+  return best === null ? null : Math.round(best);
+}
+
+// Probes every registered server in parallel and returns the fastest.
+// Throws if none respond — there is no fallback mode.
+export async function selectBestServer(
+  onProbe?: (server: TestServer, latencyMs: number | null) => void
+): Promise<ServerSelection> {
+  clearResourceTimings();
+  const probes = await Promise.all(
+    TEST_SERVERS.map(async (server) => {
+      const latencyMs = await probeServer(server);
+      onProbe?.(server, latencyMs);
+      return { server, latencyMs };
+    })
+  );
+
+  const reachable = probes.filter(
+    (p): p is ServerSelection => p.latencyMs !== null
+  );
+  if (reachable.length === 0) {
+    throw new Error(
+      "All test servers are unreachable. Check your internet connection and try again."
+    );
+  }
+  return reachable.reduce((a, b) => (b.latencyMs < a.latencyMs ? b : a));
 }
 
 // ─── Network / IP Info ───────────────────────────────────────────────────────
@@ -214,38 +480,56 @@ export function getBrowserInfo(): BrowserInfo {
 
 // ─── Ping & Jitter ────────────────────────────────────────────────────────────
 
-// Round-trip time against the backend's /ping endpoint — the same server the
-// throughput tests run on, so latency and speed describe the same path.
-export async function measurePing(
-  samples = 10,
+// HTTP fallback: warm-up plus N corrected /ping round trips.
+async function httpPingSamples(
+  serverUrl: string,
+  samples: number,
   onSample?: (ms: number, i: number) => void
-): Promise<PingResult> {
+): Promise<number[]> {
   const results: number[] = [];
-  const target = `${TEST_SERVER_URL}/ping`;
 
-  // Warm-up request: opens the TCP+TLS connection so the timed samples
-  // measure round-trip latency, not connection setup.
+  // Warm-up request, never counted: primes DNS and connection setup so
+  // the first timed sample is not an outlier.
   try {
-    await fetch(target, { cache: "no-store", signal: AbortSignal.timeout(3000) });
+    await fetch(`${serverUrl}/ping?_=warmup-${Date.now()}`, {
+      cache: "no-store",
+      signal: AbortSignal.timeout(3000),
+    });
   } catch {
-    // sampled requests below will surface a dead server
+    // the timed samples below will surface a dead server
   }
 
   for (let i = 0; i < samples; i++) {
     try {
-      const t0 = performance.now();
-      await fetch(`${target}?_=${Date.now()}-${i}`, {
-        cache: "no-store",
-        signal: AbortSignal.timeout(5000),
-      });
-      const ms = performance.now() - t0;
-      results.push(Math.round(ms));
-      onSample?.(Math.round(ms), i);
+      const ms = Math.round(
+        await sampleLatency(serverUrl, `${Date.now()}-${i}`, 5000)
+      );
+      results.push(ms);
+      onSample?.(ms, i);
       // Small gap between pings — keeps the whole phase around 2–3s
       await sleep(100);
     } catch {
       // skip failed ping
     }
+  }
+  return results;
+}
+
+// Round-trip time against the selected server — the same server the
+// throughput tests run on, so latency and speed describe the same path.
+export async function measurePing(
+  serverUrl: string,
+  samples = 10,
+  onSample?: (ms: number, i: number) => void
+): Promise<PingResult> {
+  clearResourceTimings();
+
+  // Preferred: echo round trips over one WebSocket (true network RTT).
+  let results = await wsPingSamples(serverUrl, samples, onSample);
+
+  // Fallback: HTTP /ping with Resource Timing corrections.
+  if (results.length === 0) {
+    results = await httpPingSamples(serverUrl, samples, onSample);
   }
 
   if (results.length === 0) {
@@ -305,18 +589,18 @@ function makeReporter(
   };
 }
 
-// The backend streams incompressible bytes; each stream refetches the 100MB
+// The server streams incompressible bytes; each stream refetches the 100MB
 // payload as many times as the 10-second window allows.
-const DOWNLOAD_URL = `${TEST_SERVER_URL}/download?size=100MB`;
 
 // Parallel connections saturate the link better than a single stream,
 // matching how dedicated tools (Ookla, fast.com) measure.
 const DOWNLOAD_PARALLEL_STREAMS = 4;
 
 export async function measureDownload(
+  serverUrl: string,
   onProgress?: (pct: number, mbps: number) => void
 ): Promise<SpeedResult> {
-  const sources = [DOWNLOAD_URL];
+  const sources = [`${serverUrl}/download?size=100MB`];
   const start = performance.now();
   const deadline = start + DOWNLOAD_TEST_DURATION_MS;
   const report = makeReporter(start, DOWNLOAD_TEST_DURATION_MS, onProgress);
@@ -386,9 +670,8 @@ export async function measureDownload(
 
 // ─── Upload Speed ─────────────────────────────────────────────────────────────
 
-// We POST random binary data to the backend's /upload endpoint, which
-// accepts and discards the body (no echo overhead).
-const UPLOAD_URL = `${TEST_SERVER_URL}/upload`;
+// We POST random binary data to the selected server's /upload endpoint,
+// which accepts and discards the body (no echo overhead).
 
 const UPLOAD_CHUNK_BYTES = 2 * 1024 * 1024; // per-POST payload, re-sent until time is up
 
@@ -433,6 +716,7 @@ function uploadChunk(
 }
 
 export async function measureUpload(
+  serverUrl: string,
   onProgress?: (pct: number, mbps: number) => void
 ): Promise<SpeedResult> {
   // Generate random payload (chunked — getRandomValues caps at 64KB per call)
@@ -453,7 +737,7 @@ export async function measureUpload(
     while (performance.now() < deadline && failures < 3) {
       let chunkSent = 0;
       try {
-        await uploadChunk(UPLOAD_URL, blob, deadline, (delta) => {
+        await uploadChunk(`${serverUrl}/upload`, blob, deadline, (delta) => {
           chunkSent += delta;
           total += delta;
           report(total);
