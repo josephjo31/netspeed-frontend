@@ -408,17 +408,43 @@ export async function measurePing(
   onSample?: (ms: number, i: number) => void
 ): Promise<PingResult> {
   clearResourceTimings();
-  let results = await wsPingSamples(serverUrl, samples, onSample);
-  if (results.length === 0) results = await httpPingSamples(serverUrl, samples, onSample);
-  if (results.length === 0) return { avg: 0, min: 0, max: 0, jitter: 0, samples: [] };
 
-  const avg = Math.round(results.reduce((a, b) => a + b, 0) / results.length);
-  const min = Math.min(...results);
-  const max = Math.max(...results);
+  // Use HTTP timing first because it matches server selection/probe latency.
+  // WebSocket through hosting proxies can add inflated latency.
+  let results = await httpPingSamples(serverUrl, samples, onSample);
+
+  // Fallback only if HTTP timing fails completely.
+  if (results.length === 0) {
+    results = await wsPingSamples(serverUrl, samples, onSample);
+  }
+
+  if (results.length === 0) {
+    return { avg: 0, min: 0, max: 0, jitter: 0, samples: [] };
+  }
+
+  // Remove obvious outliers but keep original samples for chart.
+  const sorted = [...results].sort((a, b) => a - b);
+  const median = sorted[Math.floor(sorted.length / 2)];
+  const cleaned = results.filter((v) => v <= median * 2 + 30);
+  const finalSamples = cleaned.length >= 3 ? cleaned : results;
+
+  const avg = Math.round(
+    finalSamples.reduce((a, b) => a + b, 0) / finalSamples.length
+  );
+  const min = Math.min(...finalSamples);
+  const max = Math.max(...finalSamples);
+
   let jitterSum = 0;
-  for (let i = 1; i < results.length; i++) jitterSum += Math.abs(results[i] - results[i - 1]);
-  const jitter = results.length > 1 ? Math.round(jitterSum / (results.length - 1)) : 0;
-  return { avg, min, max, jitter, samples: results };
+  for (let i = 1; i < finalSamples.length; i++) {
+    jitterSum += Math.abs(finalSamples[i] - finalSamples[i - 1]);
+  }
+
+  const jitter =
+    finalSamples.length > 1
+      ? Math.round(jitterSum / (finalSamples.length - 1))
+      : 0;
+
+  return { avg, min, max, jitter, samples: finalSamples };
 }
 
 // ─── Download Speed ───────────────────────────────────────────────────────────
