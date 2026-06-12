@@ -10,6 +10,7 @@ import ResultCard from "@/components/ResultCard";
 import {
   fetchNetworkInfo,
   getBrowserInfo,
+  inferConnectionType,  
   selectBestServer,
   serverHostname,
   measurePing,
@@ -166,17 +167,21 @@ export default function TestPage() {
       if (abortRef.current) return;
 
       // ── 6. Score & finalise ──────────────────────────────────────────────
-      setPhase("scoring");
-      await new Promise((r) => setTimeout(r, 800)); // brief dramatic pause
+        setPhase("scoring");
+        await new Promise((r) => setTimeout(r, 800)); // brief dramatic pause
 
-      const score = calculateScore(downloadResult, uploadResult, pingResult);
-
-      const finalResults: TestResults = {
-        network,
-        ping: pingResult,
-        download: downloadResult,
-        upload: uploadResult,
-        packetLoss: "unavailable",
+        const score = calculateScore(downloadResult, uploadResult, pingResult);
+          browser.connection = inferConnectionType(
+            network,
+            downloadResult,
+            uploadResult
+          );
+        const finalResults: TestResults = {
+          network,
+          ping: pingResult,
+          download: downloadResult,
+          upload: uploadResult,
+          packetLoss: "unavailable",
         browser,
         server: selected.server,
         serverLatencyMs: selected.latencyMs,

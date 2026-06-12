@@ -322,6 +322,7 @@ export async function fetchNetworkInfo(): Promise<NetworkInfo> {
 export function getBrowserInfo(): BrowserInfo {
   const ua = navigator.userAgent;
   let name = "Unknown", version = "";
+
   if (ua.includes("Edg/")) { name = "Edge"; version = ua.match(/Edg\/(\d+)/)?.[1] ?? ""; }
   else if (ua.includes("OPR/") || ua.includes("Opera")) { name = "Opera"; version = ua.match(/OPR\/(\d+)/)?.[1] ?? ""; }
   else if (ua.includes("Firefox/")) { name = "Firefox"; version = ua.match(/Firefox\/(\d+)/)?.[1] ?? ""; }
@@ -331,17 +332,51 @@ export function getBrowserInfo(): BrowserInfo {
   let os = "Unknown";
   if (ua.includes("Windows NT")) os = "Windows";
   else if (ua.includes("Mac OS X")) os = "macOS";
-  else if (ua.includes("Linux")) os = "Linux";
   else if (ua.includes("Android")) os = "Android";
   else if (ua.includes("iPhone") || ua.includes("iPad")) os = "iOS";
+  else if (ua.includes("Linux")) os = "Linux";
 
-  // @ts-expect-error – NetworkInformation API
-  const conn = navigator.connection ?? navigator.mozConnection ?? navigator.webkitConnection;
-  const connection = conn
-    ? `${conn.effectiveType?.toUpperCase() ?? ""}${conn.downlink ? ` · ${conn.downlink} Mbps` : ""}`
-    : "Unknown";
+  return { name, version, os, connection: "Detecting..." };
+}
+export function inferConnectionType(
+  network: NetworkInfo | null,
+  download: SpeedResult | null,
+  upload: SpeedResult | null
+): string {
+  const text = `${network?.isp ?? ""} ${network?.org ?? ""}`.toLowerCase();
+  const dl = download?.mbps ?? 0;
+  const ul = upload?.mbps ?? 0;
+  const best = Math.max(dl, ul);
 
-  return { name, version, os, connection };
+  const mobileHints = [
+    "mobile", "wireless", "cellular", "lte", "5g", "4g",
+    "vodafone", "airtel", "jio", "mtn", "orange", "ooredoo",
+    "djezzy", "mobilis", "zain", "stc", "etisalat", "du",
+    "verizon", "t-mobile", "att mobility", "rogers wireless"
+  ];
+
+  const fibreHints = [
+    "fiber", "fibre", "ftth", "broadband", "telecom", "telekom",
+    "comcast", "xfinity", "spectrum", "cox", "bt", "orange",
+    "free", "sfr", "vodafone broadband", "deutsche telekom",
+    "algérie télécom", "algerie telecom", "idoom"
+  ];
+
+  const isMobile = mobileHints.some((x) => text.includes(x));
+  const isFibreLike = fibreHints.some((x) => text.includes(x));
+
+  if (isFibreLike && best >= 100) return "Fibre / Broadband";
+  if (isFibreLike) return "Broadband";
+  if (isMobile && best >= 300) return "High-speed Mobile / 5G";
+  if (isMobile && best >= 50) return "Mobile Broadband";
+  if (isMobile) return "Mobile";
+
+  if (best >= 500) return "High-speed Fibre / Broadband";
+  if (best >= 100) return "Fibre / Broadband";
+  if (best >= 30) return "Broadband";
+  if (best > 0) return "Limited Connection";
+
+  return "Unknown";
 }
 
 // ─── Ping & Jitter ────────────────────────────────────────────────────────────
