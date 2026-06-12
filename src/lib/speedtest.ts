@@ -510,7 +510,7 @@ export async function measureDownload(
       try {
         // 100MB per request — large enough that each stream only needs one
         // fetch for the entire test window on most connections.
-        const url = `${serverUrl}/download?size=100MB&s=${idx}&n=${Math.random()}`;
+        const url = `${serverUrl}/download?size=500MB&s=${idx}&n=${Math.random()}`;
         const res = await fetch(url, { cache: "no-store", signal: controller.signal });
         if (!res.ok || !res.body) break;
 
