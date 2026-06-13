@@ -245,18 +245,6 @@ function ActiveTest({
   const gaugeMax   = isUpload ? 300 : 600;
   const gaugePct   = isUpload ? live.uploadPct : live.downloadPct;
 
-  // Formatted display number
-  const displayNum = isSpeed && gaugeValue > 0
-    ? gaugeValue >= 1000
-      ? (gaugeValue / 1000).toFixed(2)
-      : gaugeValue >= 100
-      ? gaugeValue.toFixed(0)
-      : gaugeValue.toFixed(1)
-    : "—";
-  const displayUnit = isSpeed && gaugeValue > 0
-    ? gaugeValue >= 1000 ? "Gbps" : "Mbps"
-    : "";
-
   const accentColor = isDownload ? "#00E5FF" : isUpload ? "#F59E0B" : "#4A5568";
 
   // Elapsed time counter
@@ -285,7 +273,7 @@ function ActiveTest({
   return (
     <div className="flex flex-col items-center gap-8">
 
-      {/* Phase label above the number */}
+      {/* Phase label */}
       <div className="text-center min-h-[28px] flex items-center justify-center">
         <span
           className="font-display text-xs tracking-[0.35em] uppercase transition-colors duration-500"
@@ -295,39 +283,14 @@ function ActiveTest({
         </span>
       </div>
 
-      {/* Large speed number */}
-      <div className="text-center leading-none" style={{ minHeight: 96 }}>
-        <div
-          className="font-display tabular-nums transition-colors duration-500"
-          style={{
-            fontSize: "clamp(56px, 10vw, 88px)",
-            fontWeight: 700,
-            color: isSpeed && gaugeValue > 0 ? accentColor : "#1C2030",
-            textShadow: isSpeed && gaugeValue > 0
-              ? `0 0 40px ${accentColor}55`
-              : "none",
-            letterSpacing: "-0.02em",
-            lineHeight: 1,
-          }}
-        >
-          {displayNum}
-        </div>
-        <div
-          className="font-display text-sm tracking-[0.2em] uppercase mt-2 transition-colors duration-500"
-          style={{ color: isSpeed && gaugeValue > 0 ? `${accentColor}88` : "transparent" }}
-        >
-          {displayUnit || "Mbps"}
-        </div>
-      </div>
-
-      {/* Unified gauge */}
+      {/* Speedometer gauge — renders speed number internally */}
       <div className="relative flex items-center justify-center">
         <UnifiedGauge
           value={gaugeValue}
           max={gaugeMax}
           phase={meta.gaugePhase}
           progress={gaugePct}
-          size={260}
+          size={300}
         />
 
         {/* Ping overlay inside gauge during ping phase */}

@@ -3,57 +3,63 @@
 import { useEffect, useRef } from "react";
 
 interface UnifiedGaugeProps {
-  /** Live speed — written to ref, never a useEffect dep */
   value: number;
-  /** Scale max: 500 download, 250 upload */
   max: number;
-  /** Drives color morph */
   phase: "download" | "upload" | "idle";
-  /** 0–100 progress for outer thin ring */
   progress: number;
-  /** SVG size in px */
   size?: number;
 }
 
-// Parse "r,g,b" string to numbers
-function hexToRGB(hex: string): [number, number, number] {
-  const r = parseInt(hex.slice(1, 3), 16);
-  const g = parseInt(hex.slice(3, 5), 16);
-  const b = parseInt(hex.slice(5, 7), 16);
-  return [r, g, b];
+const SCALE_MAX  = 1000;
+const SCALE_LABELS = [0, 100, 250, 500, 750, 1000];
+const START_DEG  = 225; // 7:30 position (lower-left)
+const SWEEP_DEG  = 270; // gap at the bottom
+
+const COLORS: Record<string, [number, number, number]> = {
+  download: [0,   229, 255],  // cyan
+  upload:   [245, 158, 11 ],  // amber
+  idle:     [40,  48,  70 ],  // dark gray
+};
+
+function toRad(deg: number) {
+  return ((deg - 90) * Math.PI) / 180;
 }
 
-const COLORS = {
-  download: hexToRGB("#00E5FF"),
-  upload:   hexToRGB("#F59E0B"),
-  idle:     [28, 32, 48] as [number, number, number],
-};
+function pt(cx: number, cy: number, deg: number, r: number) {
+  return { x: cx + r * Math.cos(toRad(deg)), y: cy + r * Math.sin(toRad(deg)) };
+}
+
+function arcD(cx: number, cy: number, startDeg: number, sweepDeg: number, r: number) {
+  if (sweepDeg < 0.1) return "";
+  const s  = pt(cx, cy, startDeg, r);
+  const e  = pt(cx, cy, startDeg + sweepDeg, r);
+  const lg = sweepDeg > 180 ? 1 : 0;
+  return `M ${s.x.toFixed(2)} ${s.y.toFixed(2)} A ${r} ${r} 0 ${lg} 1 ${e.x.toFixed(2)} ${e.y.toFixed(2)}`;
+}
+
+function labelAnchor(deg: number): string {
+  const n = ((deg % 360) + 360) % 360;
+  if (n >= 315 || n <= 45) return "middle"; // top
+  if (n <= 135) return "start";             // right quadrant
+  if (n < 225)  return "middle";            // bottom
+  return "end";                             // left quadrant
+}
 
 export default function UnifiedGauge({
   value,
-  max,
   phase,
-  progress,
-  size = 280,
+  size = 300,
 }: UnifiedGaugeProps) {
-  const svgRef = useRef<SVGSVGElement>(null);
+  const svgRef  = useRef<SVGSVGElement>(null);
   const animRef = useRef<number>(0);
 
-  // All frequently-changing props → refs so the rAF loop stays current
-  // without restarting the effect.
-  const valueRef    = useRef(value);
-  const maxRef      = useRef(max);
-  const phaseRef    = useRef(phase);
-  const progressRef = useRef(progress);
+  const valueRef = useRef(value);
+  const phaseRef = useRef(phase);
+  valueRef.current = value;
+  phaseRef.current = phase;
 
-  valueRef.current    = value;
-  maxRef.current      = max;
-  phaseRef.current    = phase;
-  progressRef.current = progress;
-
-  // Animated state (smooth display values)
   const displayRef = useRef(0);
-  const colorRef   = useRef<[number, number, number]>([28, 32, 48]);
+  const colorRef   = useRef<[number, number, number]>([40, 48, 70]);
 
   useEffect(() => {
     const svg = svgRef.current;
@@ -61,115 +67,186 @@ export default function UnifiedGauge({
 
     const cx = size / 2;
     const cy = size / 2;
-    const R  = size * 0.42;   // main arc radius
-    const Rp = size * 0.455;  // thin progress arc radius
-    const SW  = size * 0.052; // main stroke width
-    const SWp = size * 0.016; // progress stroke width
+    const R  = size * 0.327;
 
-    const START_DEG = 135;
-    const SWEEP_DEG = 270;
-
-    const toRad = (d: number) => ((d - 90) * Math.PI) / 180;
-    const polar = (deg: number, r: number) => ({
-      x: cx + r * Math.cos(toRad(deg)),
-      y: cy + r * Math.sin(toRad(deg)),
-    });
-
-    const arc = (sd: number, ed: number, r: number): string => {
-      if (Math.abs(ed - sd) < 0.1) return "";
-      const s = polar(sd, r);
-      const e = polar(ed, r);
-      const large = ed - sd > 180 ? 1 : 0;
-      return `M ${s.x.toFixed(2)} ${s.y.toFixed(2)} A ${r} ${r} 0 ${large} 1 ${e.x.toFixed(2)} ${e.y.toFixed(2)}`;
-    };
-
-    // Build DOM structure once
-    svg.innerHTML = "";
-    svg.setAttribute("viewBox", `0 0 ${size} ${size}`);
+    const tickOutR   = R + size * 0.018;
+    const tickMajInR = R - size * 0.052;
+    const tickMinInR = R - size * 0.028;
+    const labelR     = R + size * 0.092;
 
     const ns = "http://www.w3.org/2000/svg";
-    const el = (tag: string, attrs: Record<string, string>) => {
+    const el = (tag: string, a: Record<string, string | number> = {}) => {
       const e = document.createElementNS(ns, tag);
-      Object.entries(attrs).forEach(([k, v]) => e.setAttribute(k, v));
+      Object.entries(a).forEach(([k, v]) => e.setAttribute(k, String(v)));
       return e;
     };
 
-    // Defs
-    const defs = el("defs", {});
+    svg.innerHTML = "";
+    svg.setAttribute("viewBox", `0 0 ${size} ${size}`);
+
+    // ── Defs ──────────────────────────────────────────────────────────────
+    const defs = el("defs");
     defs.innerHTML = `
-      <filter id="g1"><feGaussianBlur stdDeviation="3" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
-      <filter id="g2"><feGaussianBlur stdDeviation="7" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+      <filter id="ug_g1" x="-50%" y="-50%" width="200%" height="200%">
+        <feGaussianBlur stdDeviation="3" result="b"/>
+        <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+      </filter>
+      <filter id="ug_g2" x="-100%" y="-100%" width="300%" height="300%">
+        <feGaussianBlur stdDeviation="9" result="b"/>
+        <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+      </filter>
+      <filter id="ug_soft" x="-150%" y="-150%" width="400%" height="400%">
+        <feGaussianBlur stdDeviation="18"/>
+      </filter>
+      <radialGradient id="ug_cap" cx="38%" cy="32%" r="65%">
+        <stop offset="0%" stop-color="rgba(255,255,255,0.20)"/>
+        <stop offset="100%" stop-color="rgba(0,0,0,0.80)"/>
+      </radialGradient>
     `;
     svg.appendChild(defs);
 
-    // Background track
+    // ── Background track ──────────────────────────────────────────────────
     svg.appendChild(el("path", {
-      d: arc(START_DEG, START_DEG + SWEEP_DEG, R),
-      fill: "none", stroke: "#0D1018",
-      "stroke-width": `${SW}`, "stroke-linecap": "round",
+      d: arcD(cx, cy, START_DEG, SWEEP_DEG, R),
+      fill: "none", stroke: "#0B0E1B",
+      "stroke-width": size * 0.068,
+      "stroke-linecap": "round",
     }));
 
-    // 5 major tick marks
-    for (let i = 0; i <= 5; i++) {
-      const deg = START_DEG + (i / 5) * SWEEP_DEG;
-      const s = polar(deg, R - SW * 0.52);
-      const e = polar(deg, R + SW * 0.22);
+    // Subtle inner rim highlight
+    svg.appendChild(el("path", {
+      d: arcD(cx, cy, START_DEG, SWEEP_DEG, R - size * 0.025),
+      fill: "none", stroke: "rgba(255,255,255,0.03)",
+      "stroke-width": 1, "stroke-linecap": "round",
+    }));
+
+    // ── Tick marks ────────────────────────────────────────────────────────
+    const majorSet = new Set(SCALE_LABELS);
+    for (let v = 0; v <= SCALE_MAX; v += 50) {
+      const isMaj = majorSet.has(v);
+      const deg   = START_DEG + (v / SCALE_MAX) * SWEEP_DEG;
+      const inner = pt(cx, cy, deg, isMaj ? tickMajInR : tickMinInR);
+      const outer = pt(cx, cy, deg, tickOutR);
       svg.appendChild(el("line", {
-        x1: `${s.x}`, y1: `${s.y}`, x2: `${e.x}`, y2: `${e.y}`,
-        stroke: "rgba(255,255,255,0.07)", "stroke-width": "1.5",
+        x1: inner.x, y1: inner.y, x2: outer.x, y2: outer.y,
+        stroke: isMaj ? "rgba(255,255,255,0.32)" : "rgba(255,255,255,0.09)",
+        "stroke-width": isMaj ? 1.5 : 0.8,
         "stroke-linecap": "round",
       }));
     }
 
-    // Progress track
-    svg.appendChild(el("path", {
-      d: arc(START_DEG, START_DEG + SWEEP_DEG, Rp),
-      fill: "none", stroke: "rgba(255,255,255,0.04)",
-      "stroke-width": `${SWp}`, "stroke-linecap": "round",
-    }));
+    // ── Scale labels ──────────────────────────────────────────────────────
+    for (const v of SCALE_LABELS) {
+      const deg  = START_DEG + (v / SCALE_MAX) * SWEEP_DEG;
+      const p    = pt(cx, cy, deg, labelR);
+      const text = el("text", {
+        x: p.x, y: p.y,
+        "text-anchor": labelAnchor(deg),
+        "dominant-baseline": "middle",
+        fill: "rgba(255,255,255,0.24)",
+        "font-size": size * 0.042,
+        "font-family": "ui-monospace, 'SF Mono', 'Courier New', monospace",
+      });
+      text.textContent = String(v);
+      svg.appendChild(text);
+    }
 
-    // Progress fill arc (animated)
-    const progressArcEl = el("path", {
-      fill: "none", "stroke-width": `${SWp}`, "stroke-linecap": "round",
-    });
-    svg.appendChild(progressArcEl);
-
-    // Glow arc (blurred, behind)
+    // ── Active arc (blurred wide glow behind) ─────────────────────────────
     const arcGlowEl = el("path", {
-      fill: "none", "stroke-width": `${SW * 1.9}`,
-      "stroke-linecap": "round", filter: "url(#g2)", opacity: "0.28",
+      fill: "none", "stroke-width": size * 0.07,
+      "stroke-linecap": "round",
+      filter: "url(#ug_soft)", opacity: "0.45",
     });
     svg.appendChild(arcGlowEl);
 
-    // Main speed arc
-    const arcMainEl = el("path", {
-      fill: "none", "stroke-width": `${SW}`,
-      "stroke-linecap": "round", filter: "url(#g1)",
+    // ── Active arc (main colored stroke) ──────────────────────────────────
+    const arcEl = el("path", {
+      fill: "none", "stroke-width": size * 0.026,
+      "stroke-linecap": "round",
+      filter: "url(#ug_g1)",
     });
-    svg.appendChild(arcMainEl);
+    svg.appendChild(arcEl);
 
-    // Dot at arc tip
-    const dotEl = el("circle", {
-      r: `${SW * 0.58}`, filter: "url(#g2)", opacity: "0",
+    // ── Needle: counterweight tail stub ───────────────────────────────────
+    const tailEl = el("line", {
+      x1: cx, y1: cy, x2: cx, y2: cy,
+      "stroke-width": size * 0.013,
+      "stroke-linecap": "round", opacity: "0.55",
     });
-    svg.appendChild(dotEl);
+    svg.appendChild(tailEl);
 
-    // ── rAF loop ──────────────────────────────────────────────────────────────
-    let frame = 0;
+    // ── Needle: wide glow layer ───────────────────────────────────────────
+    const needleGlEl = el("line", {
+      x1: cx, y1: cy, x2: cx, y2: cy,
+      "stroke-width": size * 0.02,
+      "stroke-linecap": "round",
+      filter: "url(#ug_g2)", opacity: "0.85",
+    });
+    svg.appendChild(needleGlEl);
 
+    // ── Needle: sharp front layer ──────────────────────────────────────────
+    const needleEl = el("line", {
+      x1: cx, y1: cy, x2: cx, y2: cy,
+      "stroke-width": size * 0.006,
+      "stroke-linecap": "round",
+    });
+    svg.appendChild(needleEl);
+
+    // ── Needle tip dot ────────────────────────────────────────────────────
+    const tipEl = el("circle", { r: size * 0.016, filter: "url(#ug_g1)" });
+    svg.appendChild(tipEl);
+
+    // ── Center cap ────────────────────────────────────────────────────────
+    svg.appendChild(el("circle", {
+      cx, cy, r: size * 0.058,
+      fill: "#0A0D18",
+      stroke: "rgba(255,255,255,0.09)",
+      "stroke-width": 1.5,
+    }));
+    svg.appendChild(el("circle", {
+      cx, cy, r: size * 0.036,
+      fill: "url(#ug_cap)",
+    }));
+
+    // ── Speed number (updated each frame) ─────────────────────────────────
+    const numEl = el("text", {
+      x: cx, y: cy + size * 0.22,
+      "text-anchor": "middle",
+      "dominant-baseline": "auto",
+      fill: "rgba(255,255,255,0.06)",
+      "font-size": size * 0.162,
+      "font-weight": "700",
+      "font-family": "'Inter', 'SF Pro Display', 'Helvetica Neue', system-ui, sans-serif",
+      "letter-spacing": "-0.02em",
+    });
+    numEl.textContent = "—";
+    svg.appendChild(numEl);
+
+    // ── Unit label ────────────────────────────────────────────────────────
+    const unitEl = el("text", {
+      x: cx, y: cy + size * 0.315,
+      "text-anchor": "middle",
+      "dominant-baseline": "auto",
+      fill: "rgba(255,255,255,0.08)",
+      "font-size": size * 0.048,
+      "font-weight": "500",
+      "font-family": "ui-monospace, monospace",
+      "letter-spacing": "0.18em",
+    });
+    unitEl.textContent = "MBPS";
+    svg.appendChild(unitEl);
+
+    // ── rAF loop ──────────────────────────────────────────────────────────
     const draw = () => {
-      frame++;
-      const curPhase   = phaseRef.current;
-      const curMax     = maxRef.current;
-      const curProg    = progressRef.current;
-      const targetVal  = valueRef.current;
+      const curPhase = phaseRef.current;
+      const target   = Math.min(Math.max(valueRef.current, 0), SCALE_MAX);
+      const lerp     = curPhase === "idle" ? 0.04 : 0.09;
 
-      // Smooth display value
-      const lerpSpeed = curPhase === "idle" ? 0.04 : 0.09;
-      displayRef.current += (targetVal - displayRef.current) * lerpSpeed;
+      displayRef.current += (target - displayRef.current) * lerp;
+      const disp = displayRef.current;
 
-      // Smooth color morph
-      const [tr, tg, tb] = COLORS[curPhase];
+      // Smooth color
+      const [tr, tg, tb] = COLORS[curPhase] ?? COLORS.idle;
       const [cr, cg, cb] = colorRef.current;
       const cs = 0.05;
       colorRef.current = [
@@ -179,37 +256,63 @@ export default function UnifiedGauge({
       ];
       const [r, g, b] = colorRef.current;
       const ri = r | 0; const gi = g | 0; const bi = b | 0;
-      const colorSolid = `rgb(${ri},${gi},${bi})`;
-      const colorAlpha = `rgba(${ri},${gi},${bi},0.45)`;
+      const solid = `rgb(${ri},${gi},${bi})`;
 
-      const pct = Math.min(Math.max(displayRef.current / curMax, 0), 1);
+      const pct     = Math.min(disp / SCALE_MAX, 1);
+      const needDeg = START_DEG + SWEEP_DEG * pct;
+      const needRad = toRad(needDeg);
+      const needLen = R * 0.82;
+      const nx      = cx + needLen * Math.cos(needRad);
+      const ny      = cy + needLen * Math.sin(needRad);
 
+      // Counterweight tail (opposite direction)
+      const tailLen = R * 0.17;
+      const tx = cx - tailLen * Math.cos(needRad);
+      const ty = cy - tailLen * Math.sin(needRad);
+
+      [needleEl, needleGlEl].forEach(n => {
+        n.setAttribute("x1", String(tx)); n.setAttribute("y1", String(ty));
+        n.setAttribute("x2", String(nx)); n.setAttribute("y2", String(ny));
+        n.setAttribute("stroke", solid);
+      });
+      tailEl.setAttribute("x1", String(tx)); tailEl.setAttribute("y1", String(ty));
+      tailEl.setAttribute("x2", String(cx)); tailEl.setAttribute("y2", String(cy));
+      tailEl.setAttribute("stroke", solid);
+      tipEl.setAttribute("cx", String(nx));
+      tipEl.setAttribute("cy", String(ny));
+      tipEl.setAttribute("fill", solid);
+
+      // Active arc fill
       if (pct > 0.003) {
-        const endDeg = START_DEG + SWEEP_DEG * pct;
-        const dStr   = arc(START_DEG, endDeg, R);
-        arcMainEl.setAttribute("d", dStr);
-        arcMainEl.setAttribute("stroke", colorSolid);
-        arcGlowEl.setAttribute("d", dStr);
-        arcGlowEl.setAttribute("stroke", colorSolid);
-
-        const tip = polar(endDeg, R);
-        dotEl.setAttribute("cx", `${tip.x}`);
-        dotEl.setAttribute("cy", `${tip.y}`);
-        dotEl.setAttribute("fill", colorSolid);
-        dotEl.setAttribute("opacity", "1");
+        const d = arcD(cx, cy, START_DEG, SWEEP_DEG * pct, R);
+        arcEl.setAttribute("d", d);
+        arcEl.setAttribute("stroke", `rgba(${ri},${gi},${bi},0.5)`);
+        arcGlowEl.setAttribute("d", d);
+        arcGlowEl.setAttribute("stroke", solid);
       } else {
-        arcMainEl.setAttribute("d", "");
+        arcEl.setAttribute("d", "");
         arcGlowEl.setAttribute("d", "");
-        dotEl.setAttribute("opacity", "0");
       }
 
-      // Progress ring
-      const pp = Math.min(Math.max(curProg / 100, 0), 1);
-      if (pp > 0.003) {
-        progressArcEl.setAttribute("d", arc(START_DEG, START_DEG + SWEEP_DEG * pp, Rp));
-        progressArcEl.setAttribute("stroke", colorAlpha);
+      // Speed number
+      const isSpeed = curPhase !== "idle";
+      if (isSpeed && disp > 0.5) {
+        const shown = disp >= 1000
+          ? (disp / 1000).toFixed(2)
+          : disp >= 100
+          ? disp.toFixed(0)
+          : disp.toFixed(1);
+        numEl.textContent = shown;
+        numEl.setAttribute("fill", solid);
+        numEl.setAttribute("filter", "url(#ug_g1)");
+        unitEl.textContent = disp >= 1000 ? "GBPS" : "MBPS";
+        unitEl.setAttribute("fill", `rgba(${ri},${gi},${bi},0.5)`);
       } else {
-        progressArcEl.setAttribute("d", "");
+        numEl.textContent = "—";
+        numEl.setAttribute("fill", "rgba(255,255,255,0.05)");
+        numEl.removeAttribute("filter");
+        unitEl.textContent = "MBPS";
+        unitEl.setAttribute("fill", "rgba(255,255,255,0.05)");
       }
 
       animRef.current = requestAnimationFrame(draw);
@@ -219,7 +322,6 @@ export default function UnifiedGauge({
     return () => cancelAnimationFrame(animRef.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [size]);
-  // ↑ size is the only structural dep. All live data read via refs.
 
   return (
     <svg
