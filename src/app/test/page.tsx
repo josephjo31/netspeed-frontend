@@ -224,6 +224,55 @@ const PHASE_COLOR: Record<string, string> = {
   idle:     "#4A5568",
 };
 
+const STATUS_TEXT: Record<string, string> = {
+  detecting: "Detecting network...",
+  selecting: "Selecting server...",
+  ping:      "Measuring latency...",
+  download:  "Testing Download...",
+  upload:    "Testing Upload...",
+  scoring:   "Calculating score...",
+};
+
+function fmtSpeed(mbps: number): string {
+  if (mbps <= 0) return "—";
+  if (mbps >= 1000) return (mbps / 1000).toFixed(2);
+  if (mbps >= 100)  return mbps.toFixed(0);
+  return mbps.toFixed(1);
+}
+
+function LiveStatMini({
+  label, value, unit, color, active,
+}: {
+  label: string; value: string; unit: string; color: string; active: boolean;
+}) {
+  return (
+    <div className="flex flex-col items-center gap-0.5 flex-1 min-w-0">
+      <div className="flex items-center gap-1 mb-0.5">
+        {active && (
+          <span className="w-1.5 h-1.5 rounded-full animate-pulse flex-shrink-0"
+            style={{ background: color }} />
+        )}
+        <span className="text-[9px] tracking-[0.18em] uppercase truncate"
+          style={{ color: active ? color : "#4A5568" }}>
+          {label}
+        </span>
+      </div>
+      <div
+        className="font-display tabular-nums leading-none"
+        style={{
+          fontSize: 20,
+          fontWeight: 700,
+          color: value !== "—" ? color : "#2D3748",
+          textShadow: active && value !== "—" ? `0 0 14px ${color}55` : "none",
+        }}
+      >
+        {value}
+      </div>
+      <div className="text-[9px] text-[#2D3748] uppercase tracking-wider mt-0.5">{unit}</div>
+    </div>
+  );
+}
+
 function ActiveTest({
   phase,
   live,
@@ -236,9 +285,7 @@ function ActiveTest({
   const meta      = PHASE_META[phase] ?? { label: "Running", gaugePhase: "idle" as const };
   const isDownload = phase === "download";
   const isUpload   = phase === "upload";
-  const isSpeed    = isDownload || isUpload;
 
-  // Which value to show on the gauge
   const gaugeValue = isUpload   ? live.uploadMbps
                    : isDownload ? live.downloadMbps
                    : 0;
@@ -246,6 +293,19 @@ function ActiveTest({
   const gaugePct   = isUpload ? live.uploadPct : live.downloadPct;
 
   const accentColor = isDownload ? "#00E5FF" : isUpload ? "#F59E0B" : "#4A5568";
+
+  // Live jitter from ping samples
+  const jitterMs = live.pingSamples.length > 1
+    ? Math.round(
+        live.pingSamples.slice(1).reduce((sum, ms, i) =>
+          sum + Math.abs(ms - live.pingSamples[i]), 0) /
+        (live.pingSamples.length - 1)
+      )
+    : null;
+
+  // Download unit (switches to Gbps at ≥1000)
+  const dlUnit  = live.downloadMbps >= 1000 ? "Gbps" : "Mbps";
+  const ulUnit  = live.uploadMbps  >= 1000 ? "Gbps" : "Mbps";
 
   // Elapsed time counter
   const startRef  = useRef<number | null>(null);
@@ -266,15 +326,25 @@ function ActiveTest({
     { id: "upload",   label: "Upload"   },
   ];
   const orderedPhases = ["detecting","selecting","ping","download","upload","scoring"];
-  const phaseIdx = orderedPhases.indexOf(phase);
-  const isDone   = (id: string) => orderedPhases.indexOf(id) < phaseIdx;
-  const isCurrent = (id: string) => id === phase || (id === "ping" && (phase === "detecting" || phase === "selecting"));
+  const phaseIdx  = orderedPhases.indexOf(phase);
+  const isDone    = (id: string) => orderedPhases.indexOf(id) < phaseIdx;
+  const isCurrent = (id: string) =>
+    id === phase || (id === "ping" && (phase === "detecting" || phase === "selecting"));
+
+  // Phase label icon
+  const phaseIcon = isDownload ? "↓" : isUpload ? "↑" : null;
 
   return (
-    <div className="flex flex-col items-center gap-8">
+    <div className="flex flex-col items-center gap-5">
 
-      {/* Phase label */}
-      <div className="text-center min-h-[28px] flex items-center justify-center">
+      {/* Phase label with icon */}
+      <div className="min-h-[28px] flex items-center justify-center gap-2">
+        {phaseIcon && (
+          <span className="font-display text-xs transition-colors duration-500"
+            style={{ color: accentColor }}>
+            {phaseIcon}
+          </span>
+        )}
         <span
           className="font-display text-xs tracking-[0.35em] uppercase transition-colors duration-500"
           style={{ color: accentColor }}
@@ -283,40 +353,63 @@ function ActiveTest({
         </span>
       </div>
 
-      {/* Speedometer gauge — renders speed number internally */}
-      <div className="relative flex items-center justify-center">
+      {/* Speedometer gauge */}
+      <div className="flex items-center justify-center">
         <UnifiedGauge
           value={gaugeValue}
           max={gaugeMax}
           phase={meta.gaugePhase}
           progress={gaugePct}
-          size={300}
+          size={320}
         />
+      </div>
 
-        {/* Ping overlay inside gauge during ping phase */}
-        {(phase === "ping" || phase === "detecting" || phase === "selecting") && (
-          <div className="absolute inset-0 flex flex-col items-center justify-center">
-            <div
-              className="font-display tabular-nums"
-              style={{
-                fontSize: 38,
-                color: live.pingMs > 0 ? "#A3FF47" : "#1C2030",
-                textShadow: live.pingMs > 0 ? "0 0 20px rgba(163,255,71,0.5)" : "none",
-                lineHeight: 1,
-              }}
-            >
-              {live.pingMs > 0 ? live.pingMs : "—"}
-            </div>
-            <div className="font-display text-[10px] tracking-[0.3em] text-[#4A5568] uppercase mt-1.5">
-              ms ping
-            </div>
-            {live.pingSamples.length > 1 && (
-              <div className="mt-3 w-24 opacity-60">
-                <PingChart samples={live.pingSamples} color="#A3FF47" width={96} height={28} />
-              </div>
-            )}
-          </div>
-        )}
+      {/* "Testing…" status with spinner */}
+      <div className="flex items-center gap-2">
+        <svg className="animate-spin w-3 h-3 flex-shrink-0" viewBox="0 0 24 24" fill="none"
+          style={{ color: accentColor }}>
+          <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" strokeOpacity="0.2" />
+          <path d="M12 2 A10 10 0 0 1 22 12" stroke="currentColor" strokeWidth="3" strokeLinecap="round" />
+        </svg>
+        <span className="text-[11px] tracking-wide transition-colors duration-300"
+          style={{ color: `${accentColor}99` }}>
+          {STATUS_TEXT[phase] ?? "Running..."}
+        </span>
+      </div>
+
+      {/* Live stats strip */}
+      <div className="flex items-start w-full gap-1 px-2">
+        <LiveStatMini
+          label="Ping"
+          value={live.pingMs > 0 ? String(live.pingMs) : "—"}
+          unit="ms"
+          color="#A3FF47"
+          active={phase === "ping" || phase === "detecting" || phase === "selecting"}
+        />
+        <div className="w-px self-stretch bg-[#1C2030] flex-shrink-0" />
+        <LiveStatMini
+          label="Download"
+          value={fmtSpeed(live.downloadMbps)}
+          unit={live.downloadMbps > 0 ? dlUnit : "Mbps"}
+          color="#00E5FF"
+          active={isDownload}
+        />
+        <div className="w-px self-stretch bg-[#1C2030] flex-shrink-0" />
+        <LiveStatMini
+          label="Upload"
+          value={fmtSpeed(live.uploadMbps)}
+          unit={live.uploadMbps > 0 ? ulUnit : "Mbps"}
+          color="#F59E0B"
+          active={isUpload}
+        />
+        <div className="w-px self-stretch bg-[#1C2030] flex-shrink-0" />
+        <LiveStatMini
+          label="Jitter"
+          value={jitterMs !== null ? String(jitterMs) : "—"}
+          unit="ms"
+          color="#C084FC"
+          active={false}
+        />
       </div>
 
       {/* Step pills */}
@@ -341,7 +434,8 @@ function ActiveTest({
             >
               {isDone(id) && (
                 <svg viewBox="0 0 10 10" className="w-2 h-2 flex-shrink-0">
-                  <polyline points="1.5,5 4,7.5 8.5,2.5" stroke="currentColor" strokeWidth="1.5" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+                  <polyline points="1.5,5 4,7.5 8.5,2.5" stroke="currentColor" strokeWidth="1.5"
+                    fill="none" strokeLinecap="round" strokeLinejoin="round" />
                 </svg>
               )}
               {isCurrent(id) && (
@@ -363,9 +457,7 @@ function ActiveTest({
             {serverHostname(selection.server)}
           </span>
         )}
-        <span className="tabular-nums text-[#2D3748]">
-          {elapsed}s
-        </span>
+        <span className="tabular-nums">{elapsed}s</span>
       </div>
     </div>
   );
