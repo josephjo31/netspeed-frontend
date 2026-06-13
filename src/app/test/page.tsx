@@ -1,16 +1,14 @@
 "use client";
 
-import { useState, useCallback, useRef } from "react";
+import { useState, useCallback, useRef, useEffect } from "react";
 import Link from "next/link";
 import Navbar from "@/components/Navbar";
 import Footer from "@/components/Footer";
-import SpeedGauge from "@/components/SpeedGauge";
+import UnifiedGauge from "@/components/UnifiedGauge";
 import PingChart from "@/components/PingChart";
-import ResultCard from "@/components/ResultCard";
 import {
   fetchNetworkInfo,
   getBrowserInfo,
-  inferConnectionType,  
   selectBestServer,
   serverHostname,
   measurePing,
@@ -26,18 +24,11 @@ import {
   type SpeedResult,
 } from "@/lib/speedtest";
 
-// ─── Types ───────────────────────────────────────────────────────────────────
+// ─── Types ────────────────────────────────────────────────────────────────────
 
 type Phase =
-  | "idle"
-  | "detecting"
-  | "selecting"
-  | "ping"
-  | "download"
-  | "upload"
-  | "scoring"
-  | "done"
-  | "error";
+  | "idle" | "detecting" | "selecting" | "ping"
+  | "download" | "upload" | "scoring" | "done" | "error";
 
 interface LiveState {
   pingMs: number;
@@ -48,217 +39,119 @@ interface LiveState {
   uploadPct: number;
 }
 
-// ─── Main Component ──────────────────────────────────────────────────────────
+// ─── Root page ────────────────────────────────────────────────────────────────
 
 export default function TestPage() {
-  const [phase, setPhase] = useState<Phase>("idle");
-  const [error, setError] = useState<string | null>(null);
-  const [results, setResults] = useState<TestResults | null>(null);
+  const [phase, setPhase]         = useState<Phase>("idle");
+  const [error, setError]         = useState<string | null>(null);
+  const [results, setResults]     = useState<TestResults | null>(null);
   const [selection, setSelection] = useState<ServerSelection | null>(null);
-  const [live, setLive] = useState<LiveState>({
-    pingMs: 0,
-    pingSamples: [],
-    downloadMbps: 0,
-    downloadPct: 0,
-    uploadMbps: 0,
-    uploadPct: 0,
+  const [live, setLive]           = useState<LiveState>({
+    pingMs: 0, pingSamples: [],
+    downloadMbps: 0, downloadPct: 0,
+    uploadMbps: 0, uploadPct: 0,
   });
-
   const abortRef = useRef(false);
 
-  const resetLive = () =>
-    setLive({
-      pingMs: 0,
-      pingSamples: [],
-      downloadMbps: 0,
-      downloadPct: 0,
-      uploadMbps: 0,
-      uploadPct: 0,
-    });
+  const resetLive = () => setLive({
+    pingMs: 0, pingSamples: [],
+    downloadMbps: 0, downloadPct: 0,
+    uploadMbps: 0, uploadPct: 0,
+  });
 
+  // ── All measurement logic UNCHANGED ──────────────────────────────────────
   const runTest = useCallback(async () => {
     abortRef.current = false;
-    setError(null);
-    setResults(null);
-    setSelection(null);
-    resetLive();
-
+    setError(null); setResults(null); setSelection(null); resetLive();
     try {
-      // Each phase is individually guarded: a failed step yields a null
-      // result but the test always runs to completion.
-
-      // ── 1. Detect network / ISP ──────────────────────────────────────────
       setPhase("detecting");
       let network: NetworkInfo | null = null;
       const browser = getBrowserInfo();
-      try {
-        network = await fetchNetworkInfo();
-      } catch (e) {
-        console.warn("Network detection failed:", e);
-      }
-
+      try { network = await fetchNetworkInfo(); } catch (e) { console.warn("Network detection failed:", e); }
       if (abortRef.current) return;
 
-      // ── 2. Pick the lowest-latency test server ───────────────────────────
-      // Unlike the other phases this one is fatal: without a reachable
-      // server there is nothing to measure against.
       setPhase("selecting");
       const selected = await selectBestServer();
       setSelection(selected);
       const serverUrl = selected.server.url;
-
       if (abortRef.current) return;
 
-      // ── 3. Ping & Jitter ─────────────────────────────────────────────────
       setPhase("ping");
       let pingResult: PingResult | null = null;
-
       try {
-        pingResult = await measurePing(serverUrl, 10, (ms, i) => {
+        pingResult = await measurePing(serverUrl, 10, (ms) => {
           if (abortRef.current) return;
-          setLive((prev) => ({
-            ...prev,
-            pingMs: ms,
-            pingSamples: [...prev.pingSamples, ms],
-          }));
+          setLive((prev) => ({ ...prev, pingMs: ms, pingSamples: [...prev.pingSamples, ms] }));
         });
-      } catch (e) {
-        console.warn("Ping test failed:", e);
-      }
-
+      } catch (e) { console.warn("Ping test failed:", e); }
       if (abortRef.current) return;
 
-      // ── 4. Download ──────────────────────────────────────────────────────
       setPhase("download");
       let downloadResult: SpeedResult | null = null;
-
       try {
         downloadResult = await measureDownload(serverUrl, (pct, mbps) => {
           if (abortRef.current) return;
-          setLive((prev) => ({
-            ...prev,
-            downloadMbps: mbps,
-            downloadPct: pct,
-          }));
+          setLive((prev) => ({ ...prev, downloadMbps: mbps, downloadPct: pct }));
         });
-      } catch (e) {
-        console.warn("Download test failed:", e);
-      }
-
+      } catch (e) { console.warn("Download test failed:", e); }
       if (abortRef.current) return;
 
-      // ── 5. Upload ────────────────────────────────────────────────────────
       setPhase("upload");
       let uploadResult: SpeedResult | null = null;
-
       try {
         uploadResult = await measureUpload(serverUrl, (pct, mbps) => {
           if (abortRef.current) return;
-          setLive((prev) => ({
-            ...prev,
-            uploadMbps: mbps,
-            uploadPct: pct,
-          }));
+          setLive((prev) => ({ ...prev, uploadMbps: mbps, uploadPct: pct }));
         });
-      } catch (e) {
-        console.warn("Upload test failed:", e);
-      }
-
+      } catch (e) { console.warn("Upload test failed:", e); }
       if (abortRef.current) return;
 
-      // ── 6. Score & finalise ──────────────────────────────────────────────
-        setPhase("scoring");
-        await new Promise((r) => setTimeout(r, 800)); // brief dramatic pause
-
-        const score = calculateScore(downloadResult, uploadResult, pingResult);
-          browser.connection = inferConnectionType(
-            network,
-            downloadResult,
-            uploadResult
-          );
-        const finalResults: TestResults = {
-          network,
-          ping: pingResult,
-          download: downloadResult,
-          upload: uploadResult,
-          packetLoss: "unavailable",
-        browser,
-        server: selected.server,
-        serverLatencyMs: selected.latencyMs,
-        score,
+      setPhase("scoring");
+      await new Promise((r) => setTimeout(r, 600));
+      const score = calculateScore(downloadResult, uploadResult, pingResult);
+      setResults({
+        network, ping: pingResult, download: downloadResult, upload: uploadResult,
+        packetLoss: "unavailable", browser, server: selected.server,
+        serverLatencyMs: selected.latencyMs, score,
         timestamp: new Date().toLocaleString(),
-      };
-
-      setResults(finalResults);
+      });
       setPhase("done");
     } catch (err: unknown) {
       console.error(err);
-      setError(
-        err instanceof Error
-          ? err.message
-          : "An unexpected error occurred. Please try again."
-      );
+      setError(err instanceof Error ? err.message : "An unexpected error occurred.");
       setPhase("error");
     }
   }, []);
 
   const handleReset = () => {
     abortRef.current = true;
-    setPhase("idle");
-    setResults(null);
-    setError(null);
-    setSelection(null);
-    resetLive();
+    setPhase("idle"); setResults(null); setError(null);
+    setSelection(null); resetLive();
   };
+
+  const isActive = phase !== "idle" && phase !== "done" && phase !== "error";
 
   return (
     <div className="min-h-screen bg-[#090B10] flex flex-col">
       <Navbar />
+      <main className="flex-1 pt-20 pb-16 px-4 sm:px-6">
+        <div className="max-w-2xl mx-auto">
 
-      <main className="flex-1 pt-24 pb-16 px-4 sm:px-6 lg:px-8">
-        <div className="max-w-5xl mx-auto">
-
-          {/* ── Header ───────────────────────────────────────────────────── */}
-          <div className="mb-10 flex items-center gap-4">
-            <Link
-              href="/"
-              className="text-[#4A5568] hover:text-[#00E5FF] transition-colors text-sm flex items-center gap-1"
-            >
+          {/* Breadcrumb */}
+          <div className="mb-8 flex items-center gap-3">
+            <Link href="/" className="text-[#2D3748] hover:text-[#4A5568] transition-colors text-xs tracking-wide">
               ← Home
             </Link>
-            <span className="text-[#1C2030]">/</span>
-            <span className="font-display text-xs tracking-[0.2em] text-[#00E5FF] uppercase">
-              Speed Test
-            </span>
+            <span className="text-[#1C2030] text-xs">/</span>
+            <span className="font-display text-[10px] tracking-[0.25em] text-[#00E5FF] uppercase">Speed Test</span>
           </div>
 
-          {/* ── Idle state ───────────────────────────────────────────────── */}
-          {phase === "idle" && (
-            <IdleScreen onStart={runTest} />
-          )}
-
-          {/* ── Active test ──────────────────────────────────────────────── */}
-          {(phase === "detecting" ||
-            phase === "selecting" ||
-            phase === "ping" ||
-            phase === "download" ||
-            phase === "upload" ||
-            phase === "scoring") && (
-            <ActiveTest phase={phase} live={live} selection={selection} />
-          )}
-
-          {/* ── Results ──────────────────────────────────────────────────── */}
-          {phase === "done" && results && (
-            <Results results={results} onReset={handleReset} />
-          )}
-
-          {/* ── Error ────────────────────────────────────────────────────── */}
-          {phase === "error" && (
-            <ErrorScreen message={error} onRetry={runTest} />
-          )}
+          {phase === "idle"  && <IdleScreen onStart={runTest} />}
+          {isActive          && <ActiveTest phase={phase} live={live} selection={selection} />}
+          {phase === "done"  && results && <ResultsScreen results={results} onReset={handleReset} />}
+          {phase === "error" && <ErrorScreen message={error} onRetry={runTest} />}
         </div>
       </main>
-
       <Footer />
     </div>
   );
@@ -268,60 +161,43 @@ export default function TestPage() {
 
 function IdleScreen({ onStart }: { onStart: () => void }) {
   return (
-    <div className="flex flex-col items-center justify-center text-center py-16 gap-8">
-      {/* Animated ring button */}
-      <div className="relative group cursor-pointer" onClick={onStart}>
-        <div className="absolute inset-0 rounded-full border border-[#00E5FF]/20 scale-110 group-hover:scale-125 transition-all duration-700 animate-pulse-slow" />
-        <div className="absolute inset-0 rounded-full border border-[#00E5FF]/10 scale-125 group-hover:scale-150 transition-all duration-700" />
+    <div className="flex flex-col items-center py-12 gap-10">
+      {/* Start button */}
+      <div className="relative" onClick={onStart}>
+        {/* Outer pulse rings */}
+        <div className="absolute inset-0 rounded-full border border-[#00E5FF]/8 scale-[1.35] animate-[ping_3s_ease-in-out_infinite]" />
+        <div className="absolute inset-0 rounded-full border border-[#00E5FF]/5 scale-[1.6]" />
         <button
-          className="relative w-48 h-48 rounded-full border-2 border-[#00E5FF] bg-[#00E5FF]/5 flex flex-col items-center justify-center gap-2 hover:bg-[#00E5FF]/10 transition-all duration-200 group-hover:border-[#00E5FF]"
-          style={{ boxShadow: "0 0 40px rgba(0,229,255,0.15)" }}
+          className="relative w-44 h-44 rounded-full flex flex-col items-center justify-center gap-1.5
+            border border-[#00E5FF]/25 bg-[#00E5FF]/4 hover:bg-[#00E5FF]/8 hover:border-[#00E5FF]/40
+            transition-all duration-300 cursor-pointer group"
+          style={{ boxShadow: "0 0 60px rgba(0,229,255,0.08), inset 0 0 40px rgba(0,229,255,0.03)" }}
           aria-label="Start speed test"
         >
-          <svg
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="#00E5FF"
-            strokeWidth={1.5}
-            className="w-10 h-10"
-          >
-            <path d="M13 10V3L4 14h7v7l9-11h-7z" strokeLinecap="round" strokeLinejoin="round" />
+          <svg viewBox="0 0 24 24" fill="none" className="w-9 h-9 text-[#00E5FF] group-hover:scale-110 transition-transform duration-200">
+            <path d="M13 10V3L4 14h7v7l9-11h-7z" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" />
           </svg>
-          <span className="font-display text-[#00E5FF] text-lg tracking-widest">
-            GO
-          </span>
+          <span className="font-display text-[#00E5FF] text-base tracking-[0.3em] mt-0.5">START</span>
         </button>
       </div>
 
-      <div>
-        <h1 className="text-2xl font-semibold text-white mb-2">
-          Network Speed Test
-        </h1>
-        <p className="text-[#4A5568] text-sm max-w-sm">
-          Tests download, upload, ping, jitter, and identifies your ISP and
-          location. Takes about 30 seconds.
+      <div className="text-center">
+        <h1 className="text-xl font-medium text-white mb-2 tracking-wide">Network Speed Test</h1>
+        <p className="text-[#4A5568] text-sm max-w-xs leading-relaxed">
+          Measures download, upload, ping & jitter. Takes about 30 seconds.
         </p>
       </div>
 
-      {/* What we test */}
-      <div className="flex flex-wrap justify-center gap-2 text-xs">
+      {/* What it tests */}
+      <div className="flex gap-3 flex-wrap justify-center">
         {[
           { label: "Download", color: "#00E5FF" },
-          { label: "Upload", color: "#00E5FF" },
-          { label: "Ping", color: "#A3FF47" },
-          { label: "Jitter", color: "#A3FF47" },
-          { label: "ISP Detection", color: "#94A3B8" },
-          { label: "Location", color: "#94A3B8" },
+          { label: "Upload",   color: "#F59E0B" },
+          { label: "Ping",     color: "#A3FF47" },
+          { label: "Jitter",   color: "#C084FC" },
         ].map(({ label, color }) => (
-          <span
-            key={label}
-            className="px-3 py-1 rounded-full border text-xs"
-            style={{
-              borderColor: `${color}22`,
-              color,
-              background: `${color}08`,
-            }}
-          >
+          <span key={label} className="px-3 py-1 rounded-full text-[11px] tracking-widest uppercase border"
+            style={{ color, borderColor: `${color}22`, background: `${color}08` }}>
             {label}
           </span>
         ))}
@@ -332,13 +208,20 @@ function IdleScreen({ onStart }: { onStart: () => void }) {
 
 // ─── Active Test ──────────────────────────────────────────────────────────────
 
-const PHASE_LABELS: Record<string, string> = {
-  detecting: "Detecting your network…",
-  selecting: "Selecting best test server…",
-  ping: "Measuring ping & jitter…",
-  download: "Testing download speed…",
-  upload: "Testing upload speed…",
-  scoring: "Calculating your score…",
+const PHASE_META: Record<string, { label: string; gaugePhase: "download"|"upload"|"idle" }> = {
+  detecting: { label: "Detecting network",    gaugePhase: "idle"     },
+  selecting: { label: "Selecting server",     gaugePhase: "idle"     },
+  ping:      { label: "Measuring ping",       gaugePhase: "idle"     },
+  download:  { label: "Download",             gaugePhase: "download" },
+  upload:    { label: "Upload",               gaugePhase: "upload"   },
+  scoring:   { label: "Finishing up",         gaugePhase: "idle"     },
+};
+
+const PHASE_COLOR: Record<string, string> = {
+  download: "#00E5FF",
+  upload:   "#F59E0B",
+  ping:     "#A3FF47",
+  idle:     "#4A5568",
 };
 
 function ActiveTest({
@@ -350,418 +233,297 @@ function ActiveTest({
   live: LiveState;
   selection: ServerSelection | null;
 }) {
-  const steps = ["detecting", "selecting", "ping", "download", "upload", "scoring"];
-  const stepIdx = steps.indexOf(phase);
+  const meta      = PHASE_META[phase] ?? { label: "Running", gaugePhase: "idle" as const };
+  const isDownload = phase === "download";
+  const isUpload   = phase === "upload";
+  const isSpeed    = isDownload || isUpload;
+
+  // Which value to show on the gauge
+  const gaugeValue = isUpload   ? live.uploadMbps
+                   : isDownload ? live.downloadMbps
+                   : 0;
+  const gaugeMax   = isUpload ? 300 : 600;
+  const gaugePct   = isUpload ? live.uploadPct : live.downloadPct;
+
+  // Formatted display number
+  const displayNum = isSpeed && gaugeValue > 0
+    ? gaugeValue >= 1000
+      ? (gaugeValue / 1000).toFixed(2)
+      : gaugeValue >= 100
+      ? gaugeValue.toFixed(0)
+      : gaugeValue.toFixed(1)
+    : "—";
+  const displayUnit = isSpeed && gaugeValue > 0
+    ? gaugeValue >= 1000 ? "Gbps" : "Mbps"
+    : "";
+
+  const accentColor = isDownload ? "#00E5FF" : isUpload ? "#F59E0B" : "#4A5568";
+
+  // Elapsed time counter
+  const startRef  = useRef<number | null>(null);
+  const [elapsed, setElapsed] = useState(0);
+  useEffect(() => {
+    startRef.current = Date.now();
+    setElapsed(0);
+    const id = setInterval(() => {
+      setElapsed(Math.floor((Date.now() - (startRef.current ?? Date.now())) / 1000));
+    }, 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  // Step pills
+  const steps: { id: string; label: string }[] = [
+    { id: "ping",     label: "Ping"     },
+    { id: "download", label: "Download" },
+    { id: "upload",   label: "Upload"   },
+  ];
+  const orderedPhases = ["detecting","selecting","ping","download","upload","scoring"];
+  const phaseIdx = orderedPhases.indexOf(phase);
+  const isDone   = (id: string) => orderedPhases.indexOf(id) < phaseIdx;
+  const isCurrent = (id: string) => id === phase || (id === "ping" && (phase === "detecting" || phase === "selecting"));
 
   return (
-    <div className="flex flex-col items-center gap-10">
-      {/* Phase label */}
-      <div className="text-center">
-        <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full border border-[#1C2030] bg-[#0F1219] mb-4">
-          <span className="w-1.5 h-1.5 rounded-full bg-[#00E5FF] animate-pulse" />
-          <span className="font-display text-xs text-[#00E5FF] tracking-[0.15em] uppercase">
-            {PHASE_LABELS[phase] ?? "Running…"}
-          </span>
-        </div>
+    <div className="flex flex-col items-center gap-8">
 
-        {/* Step progress bar */}
-        <div className="flex items-center gap-1.5 justify-center">
-          {steps.map((s, i) => (
-            <div
-              key={s}
-              className="h-1 rounded-full transition-all duration-500"
-              style={{
-                width: i === stepIdx ? 32 : 8,
-                background:
-                  i < stepIdx
-                    ? "#00E5FF"
-                    : i === stepIdx
-                    ? "#00E5FF"
-                    : "#1C2030",
-                opacity: i === stepIdx ? 1 : i < stepIdx ? 0.5 : 0.2,
-              }}
-            />
-          ))}
-        </div>
-
-        {/* Selected server, once the probe phase has picked one */}
-        {selection && (
-          <p className="mt-3 text-xs text-[#4A5568]">
-            Server:{" "}
-            <span className="text-[#94A3B8]">
-              {selection.server.name} · {serverHostname(selection.server)}
-            </span>
-          </p>
-        )}
+      {/* Phase label above the number */}
+      <div className="text-center min-h-[28px] flex items-center justify-center">
+        <span
+          className="font-display text-xs tracking-[0.35em] uppercase transition-colors duration-500"
+          style={{ color: accentColor }}
+        >
+          {meta.label}
+        </span>
       </div>
 
-      {/* Gauges row */}
-      <div className="flex flex-col sm:flex-row items-center justify-center gap-8 w-full">
-        {/* Download gauge */}
+      {/* Large speed number */}
+      <div className="text-center leading-none" style={{ minHeight: 96 }}>
         <div
-          className="flex flex-col items-center gap-2 transition-opacity duration-500"
-          style={{ opacity: phase === "download" || phase === "scoring" || phase === "upload" ? 1 : 0.25 }}
+          className="font-display tabular-nums transition-colors duration-500"
+          style={{
+            fontSize: "clamp(56px, 10vw, 88px)",
+            fontWeight: 700,
+            color: isSpeed && gaugeValue > 0 ? accentColor : "#1C2030",
+            textShadow: isSpeed && gaugeValue > 0
+              ? `0 0 40px ${accentColor}55`
+              : "none",
+            letterSpacing: "-0.02em",
+            lineHeight: 1,
+          }}
         >
-          <SpeedGauge
-            value={live.downloadMbps}
-            max={500}
-            unit="Mbps"
-            label="Download"
-            color="#00E5FF"
-            active={phase === "download"}
-            size={180}
-          />
-          {phase === "download" && (
-            <div className="h-1.5 rounded-full bg-[#1C2030] w-36 overflow-hidden">
-              <div
-                className="h-full rounded-full bg-[#00E5FF] transition-all duration-300"
-                style={{ width: `${live.downloadPct}%` }}
-              />
-            </div>
-          )}
+          {displayNum}
         </div>
+        <div
+          className="font-display text-sm tracking-[0.2em] uppercase mt-2 transition-colors duration-500"
+          style={{ color: isSpeed && gaugeValue > 0 ? `${accentColor}88` : "transparent" }}
+        >
+          {displayUnit || "Mbps"}
+        </div>
+      </div>
 
-        {/* Ping / Jitter center column */}
-        <div className="flex flex-col items-center gap-4 min-w-[140px]">
-          {/* Ping value */}
-          <div className="text-center">
+      {/* Unified gauge */}
+      <div className="relative flex items-center justify-center">
+        <UnifiedGauge
+          value={gaugeValue}
+          max={gaugeMax}
+          phase={meta.gaugePhase}
+          progress={gaugePct}
+          size={260}
+        />
+
+        {/* Ping overlay inside gauge during ping phase */}
+        {(phase === "ping" || phase === "detecting" || phase === "selecting") && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center">
             <div
-              className="font-display text-4xl font-bold transition-all duration-200"
+              className="font-display tabular-nums"
               style={{
-                color: live.pingMs > 0 ? "#A3FF47" : "#2D3748",
+                fontSize: 38,
+                color: live.pingMs > 0 ? "#A3FF47" : "#1C2030",
                 textShadow: live.pingMs > 0 ? "0 0 20px rgba(163,255,71,0.5)" : "none",
+                lineHeight: 1,
               }}
             >
               {live.pingMs > 0 ? live.pingMs : "—"}
             </div>
-            <div className="font-display text-xs text-[#4A5568] tracking-widest mt-1">
-              PING (ms)
+            <div className="font-display text-[10px] tracking-[0.3em] text-[#4A5568] uppercase mt-1.5">
+              ms ping
             </div>
+            {live.pingSamples.length > 1 && (
+              <div className="mt-3 w-24 opacity-60">
+                <PingChart samples={live.pingSamples} color="#A3FF47" width={96} height={28} />
+              </div>
+            )}
           </div>
-
-          {/* Live sparkline */}
-          {live.pingSamples.length > 1 && (
-            <PingChart
-              samples={live.pingSamples}
-              color="#A3FF47"
-              width={140}
-              height={50}
-            />
-          )}
-
-          {/* Phase indicator */}
-          <div
-            className="font-display text-[10px] tracking-widest uppercase px-2 py-0.5 rounded"
-            style={{
-              color:
-                phase === "ping"
-                  ? "#A3FF47"
-                  : phase === "download"
-                  ? "#00E5FF"
-                  : phase === "upload"
-                  ? "#F59E0B"
-                  : "#4A5568",
-              background:
-                phase === "ping"
-                  ? "rgba(163,255,71,0.08)"
-                  : phase === "download"
-                  ? "rgba(0,229,255,0.08)"
-                  : phase === "upload"
-                  ? "rgba(245,158,11,0.08)"
-                  : "rgba(74,85,104,0.08)",
-            }}
-          >
-            {phase === "detecting" ? "Detecting" : phase}
-          </div>
-        </div>
-
-        {/* Upload gauge */}
-        <div
-          className="flex flex-col items-center gap-2 transition-opacity duration-500"
-          style={{ opacity: phase === "upload" || phase === "scoring" ? 1 : 0.25 }}
-        >
-          <SpeedGauge
-            value={live.uploadMbps}
-            max={250}
-            unit="Mbps"
-            label="Upload"
-            color="#F59E0B"
-            active={phase === "upload"}
-            size={180}
-          />
-          {phase === "upload" && (
-            <div className="h-1.5 rounded-full bg-[#1C2030] w-36 overflow-hidden">
-              <div
-                className="h-full rounded-full bg-[#F59E0B] transition-all duration-300"
-                style={{ width: `${live.uploadPct}%` }}
-              />
-            </div>
-          )}
-        </div>
+        )}
       </div>
 
-      {/* Detecting info placeholder */}
-      {phase === "detecting" && (
-        <div className="flex gap-3 flex-wrap justify-center">
-          {["IP Address", "ISP", "Location", "Browser"].map((item) => (
+      {/* Step pills */}
+      <div className="flex items-center gap-3">
+        {steps.map(({ id, label }) => (
+          <div key={id} className="flex items-center gap-2">
             <div
-              key={item}
-              className="px-4 py-2 rounded-lg border border-[#1C2030] bg-[#0F1219] flex items-center gap-2"
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[10px] tracking-widest uppercase border transition-all duration-300"
+              style={{
+                borderColor: isDone(id)
+                  ? `${PHASE_COLOR[id] ?? "#4A5568"}33`
+                  : isCurrent(id)
+                  ? `${PHASE_COLOR[id] ?? "#4A5568"}55`
+                  : "#1C2030",
+                color: isDone(id) || isCurrent(id)
+                  ? PHASE_COLOR[id] ?? "#4A5568"
+                  : "#2D3748",
+                background: isCurrent(id)
+                  ? `${PHASE_COLOR[id] ?? "#4A5568"}10`
+                  : "transparent",
+              }}
             >
-              <div className="w-1.5 h-1.5 rounded-full bg-[#00E5FF] animate-pulse" />
-              <span className="text-xs text-[#4A5568]">{item}</span>
+              {isDone(id) && (
+                <svg viewBox="0 0 10 10" className="w-2 h-2 flex-shrink-0">
+                  <polyline points="1.5,5 4,7.5 8.5,2.5" stroke="currentColor" strokeWidth="1.5" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              )}
+              {isCurrent(id) && (
+                <span className="w-1.5 h-1.5 rounded-full bg-current animate-pulse flex-shrink-0" />
+              )}
+              {label}
             </div>
-          ))}
-        </div>
-      )}
+          </div>
+        ))}
+      </div>
+
+      {/* Server + elapsed row */}
+      <div className="flex items-center gap-4 text-[11px] text-[#2D3748]">
+        {selection && (
+          <span className="flex items-center gap-1.5">
+            <span className="w-1 h-1 rounded-full bg-[#00E5FF] opacity-60" />
+            {selection.server.name}
+            <span className="text-[#1C2030]">·</span>
+            {serverHostname(selection.server)}
+          </span>
+        )}
+        <span className="tabular-nums text-[#2D3748]">
+          {elapsed}s
+        </span>
+      </div>
     </div>
   );
 }
 
 // ─── Results Screen ───────────────────────────────────────────────────────────
 
-function Results({
+function ResultsScreen({
   results,
   onReset,
 }: {
   results: TestResults;
   onReset: () => void;
 }) {
-  const { ping, download, upload, network, browser, score, timestamp } = results;
+  const { ping, download, upload, network, browser, score, timestamp, server } = results;
   const { label: scoreText, color: scoreColor } = scoreLabel(score);
 
   return (
-    <div className="space-y-8 animate-fade-in">
-      {/* Score hero */}
-      <div
-        className="rounded-2xl border p-8 text-center relative overflow-hidden"
-        style={{
-          borderColor: `${scoreColor}33`,
-          background: `linear-gradient(135deg, #0F1219 0%, ${scoreColor}08 100%)`,
-        }}
-      >
-        <div
-          className="absolute inset-0 opacity-5"
-          style={{
-            backgroundImage: `radial-gradient(circle at 50% 0%, ${scoreColor}, transparent 60%)`,
-          }}
-        />
-        <p className="font-display text-xs tracking-[0.3em] text-[#4A5568] uppercase mb-2">
-          Your Score
-        </p>
-        <div
-          className="font-display text-7xl font-bold leading-none mb-2"
-          style={{ color: scoreColor, textShadow: `0 0 40px ${scoreColor}66` }}
-        >
-          {score}
-        </div>
-        <div
-          className="inline-flex px-4 py-1 rounded-full text-sm font-medium border mb-4"
-          style={{
-            color: scoreColor,
-            borderColor: `${scoreColor}33`,
-            background: `${scoreColor}12`,
-          }}
-        >
-          {scoreText}
-        </div>
-        <div className="mb-3">
-          <span
-            className="inline-flex items-center px-3 py-1 rounded-full font-display text-[10px] tracking-[0.15em] uppercase border"
-            style={{
-              color: "#A3FF47",
-              borderColor: "#A3FF4733",
-              background: "#A3FF4710",
-            }}
-          >
-            Real Server Test
-          </span>
-        </div>
-        <p className="text-xs text-[#4A5568]">Tested {timestamp}</p>
-      </div>
+    <div className="flex flex-col gap-6">
 
-      {/* Main metrics */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <ResultCard
+      {/* ── Primary 4-stat strip ─────────────────────────────────────────── */}
+      <div className="grid grid-cols-2 gap-3">
+        <StatCard
           label="Download"
           value={download ? formatMbps(download.mbps) : "—"}
-          sub={download ? `${(download.bytes / 1e6).toFixed(1)} MB in ${(download.durationMs / 1000).toFixed(1)}s` : undefined}
+          sub={download ? `${(download.bytes / 1e6).toFixed(0)} MB in ${(download.durationMs / 1000).toFixed(1)}s` : undefined}
           color="#00E5FF"
-          icon={
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-4 h-4">
-              <polyline points="8 17 12 21 16 17" />
-              <line x1="12" y1="3" x2="12" y2="21" />
-            </svg>
-          }
+          icon={<ArrowDown />}
         />
-        <ResultCard
+        <StatCard
           label="Upload"
           value={upload ? formatMbps(upload.mbps) : "—"}
-          sub={upload ? `${(upload.bytes / 1e6).toFixed(1)} MB in ${(upload.durationMs / 1000).toFixed(1)}s` : undefined}
+          sub={upload ? `${(upload.bytes / 1e6).toFixed(0)} MB in ${(upload.durationMs / 1000).toFixed(1)}s` : undefined}
           color="#F59E0B"
-          icon={
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-4 h-4">
-              <polyline points="16 7 12 3 8 7" />
-              <line x1="12" y1="21" x2="12" y2="3" />
-            </svg>
-          }
+          icon={<ArrowUp />}
         />
-        <ResultCard
+        <StatCard
           label="Ping"
           value={ping ? `${ping.avg} ms` : "—"}
-          sub={ping ? `Min ${ping.min}ms · Max ${ping.max}ms` : undefined}
+          sub={ping ? `min ${ping.min} · max ${ping.max}` : undefined}
           color="#A3FF47"
-          icon={
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-4 h-4">
-              <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
-            </svg>
-          }
+          icon={<WaveIcon />}
         />
-        <ResultCard
+        <StatCard
           label="Jitter"
           value={ping ? `${ping.jitter} ms` : "—"}
           sub={ping ? `${ping.samples.length} samples` : undefined}
           color="#C084FC"
-          icon={
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-4 h-4">
-              <path d="M2 12 Q6 4 10 12 Q14 20 18 12 Q20 8 22 12" />
-            </svg>
-          }
+          icon={<JitterIcon />}
         />
       </div>
 
-      {/* Ping sparkline */}
+      {/* ── Score bar ────────────────────────────────────────────────────── */}
+      <div
+        className="rounded-xl border px-5 py-4 flex items-center justify-between"
+        style={{ borderColor: `${scoreColor}20`, background: `${scoreColor}06` }}
+      >
+        <div>
+          <p className="text-[10px] text-[#4A5568] uppercase tracking-widest mb-1">Network Score</p>
+          <p className="text-sm font-medium" style={{ color: scoreColor }}>{scoreText}</p>
+        </div>
+        <div
+          className="font-display text-4xl font-bold tabular-nums"
+          style={{ color: scoreColor, textShadow: `0 0 24px ${scoreColor}55` }}
+        >
+          {score}
+        </div>
+      </div>
+
+      {/* ── Ping sparkline ────────────────────────────────────────────────── */}
       {ping && ping.samples.length > 1 && (
-        <div className="rounded-xl border border-[#1C2030] bg-[#0F1219] p-5">
-          <div className="flex items-center justify-between mb-4">
-            <div>
-              <p className="text-xs text-[#4A5568] uppercase tracking-widest mb-0.5">
-                Ping over time
-              </p>
-              <p className="text-sm text-white">
-                {ping.samples.length} samples · avg {ping.avg}ms · jitter{" "}
-                {ping.jitter}ms
-              </p>
-            </div>
-            <div className="font-display text-xs text-[#A3FF47]">
-              {ping.min}ms — {ping.max}ms
-            </div>
+        <div className="rounded-xl border border-[#1C2030] bg-[#0A0D13] p-4">
+          <div className="flex items-center justify-between mb-3">
+            <p className="text-[10px] text-[#4A5568] uppercase tracking-widest">Ping over time</p>
+            <span className="text-[10px] text-[#2D3748] tabular-nums">
+              avg {ping.avg}ms · jitter {ping.jitter}ms
+            </span>
           </div>
-          <div className="w-full">
-            <PingChart
-              samples={ping.samples}
-              color="#A3FF47"
-              height={64}
-            />
-          </div>
+          <PingChart samples={ping.samples} color="#A3FF47" height={52} />
         </div>
       )}
 
-      {/* Packet loss */}
-      <ResultCard
-        label="Packet Loss"
-        value="Unavailable"
-        color="#4A5568"
-        note="Browser security restrictions prevent raw ICMP/UDP packet-loss measurement. For accurate packet loss, use a desktop tool like PingPlotter or WinMTR."
-        icon={
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-4 h-4">
-            <circle cx="12" cy="12" r="10" />
-            <line x1="4.93" y1="4.93" x2="19.07" y2="19.07" />
-          </svg>
-        }
-      />
-
-      {/* Selected test server */}
-      <div className="rounded-xl border border-[#1C2030] bg-[#0F1219] overflow-hidden">
-        <div className="px-5 py-4 border-b border-[#1C2030]">
-          <p className="text-xs text-[#4A5568] uppercase tracking-widest">
-            Selected Test Server
-          </p>
+      {/* ── Server + network details ──────────────────────────────────────── */}
+      <div className="rounded-xl border border-[#1C2030] bg-[#0A0D13] overflow-hidden">
+        <div className="px-4 py-3 border-b border-[#1C2030]">
+          <p className="text-[10px] text-[#2D3748] uppercase tracking-widest">Test Details</p>
         </div>
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-0 divide-x divide-y divide-[#1C2030]">
+        <div className="divide-y divide-[#0F1219]">
           {[
-            { label: "Server", value: results.server.name },
-            { label: "Host", value: serverHostname(results.server) },
-            { label: "Region", value: results.server.region },
-            { label: "Probe Latency", value: `${results.serverLatencyMs} ms` },
+            { label: "Server",     value: `${server.name} · ${serverHostname(server)}` },
+            { label: "Tested",     value: timestamp },
+            ...(network ? [
+              { label: "IP",       value: network.ip  },
+              { label: "ISP",      value: network.isp },
+              { label: "Location", value: [network.city, network.country].filter(Boolean).join(", ") },
+            ] : []),
+            { label: "Browser",    value: `${browser.name} ${browser.version}` },
+            { label: "OS",         value: browser.os },
           ].map(({ label, value }) => (
-            <div key={label} className="px-5 py-4">
-              <p className="text-[10px] text-[#4A5568] uppercase tracking-widest mb-1">
+            <div key={label} className="flex items-center px-4 py-2.5 gap-4">
+              <span className="text-[10px] text-[#2D3748] uppercase tracking-widest w-20 flex-shrink-0">
                 {label}
-              </p>
-              <p className="text-sm text-white font-medium truncate">{value}</p>
+              </span>
+              <span className="text-xs text-[#94A3B8] truncate">{value || "—"}</span>
             </div>
           ))}
         </div>
       </div>
 
-      {/* Network info grid */}
-      {network && (
-        <div className="rounded-xl border border-[#1C2030] bg-[#0F1219] overflow-hidden">
-          <div className="px-5 py-4 border-b border-[#1C2030]">
-            <p className="text-xs text-[#4A5568] uppercase tracking-widest">
-              Network Details
-            </p>
-          </div>
-          <div className="grid grid-cols-2 sm:grid-cols-3 gap-0 divide-x divide-y divide-[#1C2030]">
-            {[
-              { label: "IP Address", value: network.ip },
-              { label: "ISP", value: network.isp },
-              { label: "Country", value: network.country },
-              { label: "City", value: `${network.city}${network.region ? `, ${network.region}` : ""}` },
-              { label: "Timezone", value: network.timezone || "—" },
-              {
-                label: "Server",
-                value: `${results.server.name} · ${serverHostname(results.server)}`,
-              },
-            ].map(({ label, value }) => (
-              <div key={label} className="px-5 py-4">
-                <p className="text-[10px] text-[#4A5568] uppercase tracking-widest mb-1">
-                  {label}
-                </p>
-                <p className="text-sm text-white font-medium truncate">{value || "—"}</p>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Browser info */}
-      <div className="rounded-xl border border-[#1C2030] bg-[#0F1219] overflow-hidden">
-        <div className="px-5 py-4 border-b border-[#1C2030]">
-          <p className="text-xs text-[#4A5568] uppercase tracking-widest">
-            Client Info
-          </p>
-        </div>
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-0 divide-x divide-y divide-[#1C2030]">
-          {[
-            { label: "Browser", value: `${browser.name} ${browser.version}` },
-            { label: "OS", value: browser.os },
-            { label: "Connection", value: browser.connection },
-            { label: "Protocol", value: "HTTPS" },
-          ].map(({ label, value }) => (
-            <div key={label} className="px-5 py-4">
-              <p className="text-[10px] text-[#4A5568] uppercase tracking-widest mb-1">
-                {label}
-              </p>
-              <p className="text-sm text-white font-medium truncate">{value}</p>
-            </div>
-          ))}
-        </div>
-      </div>
-
-      {/* Actions */}
-      <div className="flex flex-col sm:flex-row items-center justify-center gap-4 pt-4">
+      {/* ── Actions ──────────────────────────────────────────────────────── */}
+      <div className="flex gap-3">
         <button
           onClick={onReset}
-          className="px-8 py-3 rounded-xl bg-[#00E5FF] text-[#090B10] font-semibold text-sm tracking-wide hover:bg-white transition-all duration-200 w-full sm:w-auto"
-          style={{ boxShadow: "0 0 20px rgba(0,229,255,0.3)" }}
+          className="flex-1 py-3 rounded-xl bg-[#00E5FF] text-[#090B10] font-semibold text-sm tracking-wide hover:bg-white transition-colors duration-200"
+          style={{ boxShadow: "0 0 24px rgba(0,229,255,0.25)" }}
         >
-          ↺ Run Again
+          ↺ Test Again
         </button>
-        <Link href="/#tests" className="w-full sm:w-auto">
-          <button className="w-full px-8 py-3 rounded-xl border border-[#1C2030] text-[#94A3B8] text-sm font-medium hover:border-[#00E5FF] hover:text-[#00E5FF] transition-all duration-200">
-            Try Gaming Test →
+        <Link href="/" className="flex-1">
+          <button className="w-full py-3 rounded-xl border border-[#1C2030] text-[#4A5568] text-sm hover:border-[#2D3748] hover:text-[#94A3B8] transition-colors duration-200">
+            ← Home
           </button>
         </Link>
       </div>
@@ -769,42 +531,105 @@ function Results({
   );
 }
 
-// ─── Error Screen ─────────────────────────────────────────────────────────────
+// ─── Stat Card ────────────────────────────────────────────────────────────────
 
-function ErrorScreen({
-  message,
-  onRetry,
+function StatCard({
+  label, value, sub, color, icon,
 }: {
-  message: string | null;
-  onRetry: () => void;
+  label: string; value: string; sub?: string;
+  color: string; icon: React.ReactNode;
 }) {
   return (
-    <div className="flex flex-col items-center justify-center text-center py-16 gap-6">
-      <div className="w-16 h-16 rounded-full border border-red-500/20 bg-red-500/05 flex items-center justify-center">
-        <svg
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="#EF4444"
-          strokeWidth={1.5}
-          className="w-8 h-8"
+    <div
+      className="rounded-xl border bg-[#0A0D13] p-4 flex flex-col gap-2.5 relative overflow-hidden"
+      style={{ borderColor: `${color}18` }}
+    >
+      {/* Corner glow */}
+      <div
+        className="absolute top-0 right-0 w-16 h-16 pointer-events-none opacity-[0.07]"
+        style={{ background: `radial-gradient(circle at top right, ${color}, transparent)` }}
+      />
+      <div className="flex items-center gap-2">
+        <div
+          className="w-6 h-6 rounded-md flex items-center justify-center flex-shrink-0"
+          style={{ background: `${color}12`, color }}
         >
+          {icon}
+        </div>
+        <span className="text-[10px] text-[#2D3748] uppercase tracking-widest">{label}</span>
+      </div>
+      <div>
+        <div
+          className="font-display text-2xl font-bold leading-none tabular-nums"
+          style={{ color, textShadow: `0 0 16px ${color}44` }}
+        >
+          {value}
+        </div>
+        {sub && (
+          <div className="text-[10px] text-[#2D3748] mt-1 tabular-nums">{sub}</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── Error Screen ─────────────────────────────────────────────────────────────
+
+function ErrorScreen({ message, onRetry }: { message: string | null; onRetry: () => void }) {
+  return (
+    <div className="flex flex-col items-center justify-center text-center py-16 gap-6">
+      <div className="w-14 h-14 rounded-full border border-red-900/40 bg-red-950/20 flex items-center justify-center">
+        <svg viewBox="0 0 24 24" fill="none" stroke="#EF4444" strokeWidth={1.5} className="w-7 h-7">
           <circle cx="12" cy="12" r="10" />
           <line x1="12" y1="8" x2="12" y2="12" />
           <line x1="12" y1="16" x2="12.01" y2="16" />
         </svg>
       </div>
       <div>
-        <h2 className="text-xl font-semibold text-white mb-2">Test failed</h2>
+        <h2 className="text-lg font-medium text-white mb-2">Test failed</h2>
         <p className="text-[#4A5568] text-sm max-w-sm">
           {message ?? "Something went wrong. Check your connection and try again."}
         </p>
       </div>
       <button
         onClick={onRetry}
-        className="px-8 py-3 rounded-xl bg-[#00E5FF] text-[#090B10] font-semibold text-sm tracking-wide hover:bg-white transition-all duration-200"
+        className="px-8 py-3 rounded-xl bg-[#00E5FF] text-[#090B10] font-semibold text-sm"
       >
         Try Again
       </button>
     </div>
+  );
+}
+
+// ─── Inline SVG icons ─────────────────────────────────────────────────────────
+
+function ArrowDown() {
+  return (
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={1.75} className="w-3.5 h-3.5">
+      <polyline points="4,8 8,12 12,8" strokeLinecap="round" strokeLinejoin="round" />
+      <line x1="8" y1="3" x2="8" y2="12" strokeLinecap="round" />
+    </svg>
+  );
+}
+function ArrowUp() {
+  return (
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={1.75} className="w-3.5 h-3.5">
+      <polyline points="4,8 8,4 12,8" strokeLinecap="round" strokeLinejoin="round" />
+      <line x1="8" y1="4" x2="8" y2="13" strokeLinecap="round" />
+    </svg>
+  );
+}
+function WaveIcon() {
+  return (
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={1.5} className="w-3.5 h-3.5">
+      <polyline points="1,8 3.5,8 5,4 7,12 9,8 11,8 12.5,5 14,8 15,8" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+function JitterIcon() {
+  return (
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={1.5} className="w-3.5 h-3.5">
+      <polyline points="1,8 3,5 5,11 7,4 9,10 11,6 13,9 15,8" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
   );
 }
